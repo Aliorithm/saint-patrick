@@ -10,6 +10,7 @@ const express = require("express");
 const INSTANCE_ID = parseInt(process.env.INSTANCE_ID);
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const BOT = "patrickstarsrobot";
+const ADMIN = "Aliorythm"; // Admin username for error notifications
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const PORT = process.env.PORT || 10000;
@@ -45,6 +46,16 @@ async function incrementError(userId, error) {
   } else {
     await updateAccount(userId, { last_error: error, error_count: count });
     console.log(`⚠️ Account ${userId} error ${count}/3`);
+  }
+}
+
+async function sendErrorNotification(client, userId, error, phone) {
+  try {
+    const message = `⚠️ Error Alert\n\nInstance: ${INSTANCE_ID}\nUser: ${userId}\nPhone: ${phone || "unknown"}\nError: ${error}\n\nTime: ${new Date().toLocaleString()}`;
+    await client.sendMessage(ADMIN, { message });
+    console.log(`📨 Error notification sent to @${ADMIN}`);
+  } catch (e) {
+    console.log(`Failed to send notification: ${e.message}`);
   }
 }
 
@@ -327,6 +338,16 @@ async function doClicker(client, userId) {
     const popup = await getCallbackAnswer(client, menu, clickerBtn.data);
     console.log(`[CLICKER] Popup: ${popup || "none"}`);
     
+    // Check for daily limit FIRST
+    if (popup?.includes("завтра") || popup?.includes("слишком много")) {
+      console.log("[CLICKER] ⚠️ Daily limit reached!");
+      await updateAccount(userId, {
+        next_clicker_time: new Date(Date.now() + 24 * 60 * 60000).toISOString(),
+        last_error: "Daily limit: Ты слишком много кликал",
+      });
+      return false;
+    }
+    
     // Check for task required
     if (popup?.includes("выполни хотя бы")) {
       console.log("[CLICKER] Task required!");
@@ -343,16 +364,6 @@ async function doClicker(client, userId) {
         console.log("[CLICKER] Tasks failed");
         return false;
       }
-    }
-    
-    // Check for daily limit
-    if (popup?.includes("завтра") || popup?.includes("слишком много")) {
-      console.log("[CLICKER] Daily limit reached!");
-      await updateAccount(userId, {
-        next_clicker_time: new Date(Date.now() + 24 * 60 * 60000).toISOString(),
-        last_error: "Daily limit reached",
-      });
-      return false;
     }
   }
 
@@ -439,6 +450,11 @@ async function processAccount(acc) {
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
     await incrementError(acc.user_id, error.message);
+    
+    // Send notification to admin
+    if (client) {
+      await sendErrorNotification(client, acc.user_id, error.message, acc.phone);
+    }
   } finally {
     if (client) {
       await sleep(500);
