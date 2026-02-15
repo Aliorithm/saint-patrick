@@ -10,7 +10,7 @@ const express = require("express");
 const INSTANCE_ID = parseInt(process.env.INSTANCE_ID);
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
+  process.env.SUPABASE_ANON_KEY,
 );
 const BOT_USERNAME = "patrickstarsrobot";
 const API_ID = parseInt(process.env.API_ID);
@@ -128,7 +128,7 @@ async function findMainMenu(client) {
     (m) =>
       m.text?.includes("Получи свою личную ссылку") &&
       m.text?.includes("Заработать звезды") &&
-      m.replyMarkup
+      m.replyMarkup,
   );
 
   return mainMenu;
@@ -235,7 +235,7 @@ async function handleTask(client, userId) {
       (m) =>
         m.text?.includes("Новое задание") &&
         m.replyMarkup &&
-        m.replyMarkup.rows
+        m.replyMarkup.rows,
     );
 
     if (!taskMsg) {
@@ -298,7 +298,9 @@ async function handleTask(client, userId) {
       if (match) {
         botUsername = match[1];
         startParam = match[2];
-        console.log(`[TASK] Bot link: @${botUsername} with start=${startParam}`);
+        console.log(
+          `[TASK] Bot link: @${botUsername} with start=${startParam}`,
+        );
       }
     }
     // Type 2: Channel/Group - https://t.me/+invite or https://t.me/username
@@ -315,7 +317,9 @@ async function handleTask(client, userId) {
       if (botUsername && startParam) {
         console.log(`[TASK] Starting bot @${botUsername}...`);
         await sleep(DELAY.AFTER_SUBSCRIBE());
-        await client.sendMessage(botUsername, { message: `/start ${startParam}` });
+        await client.sendMessage(botUsername, {
+          message: `/start ${startParam}`,
+        });
         await sleep(DELAY.AFTER_JOIN());
       }
       // Handle channel/group link
@@ -327,7 +331,7 @@ async function handleTask(client, userId) {
           await client.invoke(
             new Api.channels.JoinChannel({
               channel: channelUsername,
-            })
+            }),
           );
           console.log("[TASK] Successfully joined channel");
           channelToLeave = channelUsername; // Save to leave later
@@ -359,7 +363,7 @@ async function handleTask(client, userId) {
           limit: 2,
         });
         const successMsg = successMessages.find((m) =>
-          m.text?.includes("Задание выполнено")
+          m.text?.includes("Задание выполнено"),
         );
 
         if (successMsg) {
@@ -392,7 +396,7 @@ async function handleTask(client, userId) {
       await client.invoke(
         new Api.channels.LeaveChannel({
           channel: channelToLeave,
-        })
+        }),
       );
       console.log("[TASK] Successfully left channel");
     } catch (leaveError) {
@@ -428,7 +432,7 @@ async function performClicker(client, userId) {
 
   // Check for task error: "Чтобы кликать дальше — выполни хотя бы 1 задание!"
   const taskError = recentMessages.find((m) =>
-    m.text?.includes("Чтобы кликать дальше")
+    m.text?.includes("Чтобы кликать дальше"),
   );
 
   if (taskError) {
@@ -452,7 +456,7 @@ async function performClicker(client, userId) {
     } else {
       // Failed to complete task, delay next click
       console.log(
-        "[CLICKER] Failed to complete task, delaying next click by 1 hour"
+        "[CLICKER] Failed to complete task, delaying next click by 1 hour",
       );
       await updateAccount(userId, {
         next_clicker_time: getNextClickerTimeDelayed().toISOString(),
@@ -467,7 +471,7 @@ async function performClicker(client, userId) {
     limit: 3,
   });
   const captchaMsg = messagesAfterClick.find((m) =>
-    m.text?.includes("ПРОВЕРКА НА РОБОТА")
+    m.text?.includes("ПРОВЕРКА НА РОБОТА"),
   );
 
   if (captchaMsg) {
@@ -484,9 +488,8 @@ async function performClicker(client, userId) {
     .eq("user_id", userId)
     .single();
 
-  // Update next clicker time and increment counter
+  // Update stats only (next_clicker_time already updated)
   await updateAccount(userId, {
-    next_clicker_time: getNextClickerTime().toISOString(),
     total_clicks: (data?.total_clicks || 0) + 1,
     last_click_at: new Date().toISOString(),
     error_count: 0,
@@ -518,7 +521,7 @@ async function performDaily(client, userId) {
   // Get the profile menu and click "🎁 Ежедневка"
   const messages = await client.getMessages(BOT_USERNAME, { limit: 3 });
   const profileMenu = messages.find(
-    (m) => m.replyMarkup && m.text?.includes("Профиль")
+    (m) => m.replyMarkup && m.text?.includes("Профиль"),
   );
 
   if (!profileMenu) {
@@ -530,6 +533,71 @@ async function performDaily(client, userId) {
 
   await sleep(DELAY.AFTER_BUTTON_CLICK);
 
+  // Check for task error or captcha after daily click
+  const messagesAfterClick = await client.getMessages(BOT_USERNAME, {
+    limit: 3,
+  });
+
+  // Check for task requirement error
+  const taskError = messagesAfterClick.find((m) =>
+    m.text?.includes("Чтобы кликать дальше"),
+  );
+
+  if (taskError) {
+    console.log("[DAILY] Task required! Handling task...");
+    const taskCompleted = await handleTask(client, userId);
+
+    if (taskCompleted) {
+      // Task done, now click daily again
+      console.log("[DAILY] Task completed, clicking daily again...");
+      await sleep(DELAY.BETWEEN_CLICKS());
+
+      // Go back to main menu
+      await client.sendMessage(BOT_USERNAME, { message: "/start" });
+      await sleep(DELAY.AFTER_START);
+
+      // Click profile again
+      const menu2 = await ensureMainMenu(client);
+      if (menu2) {
+        await menu2.click({ text: "👤 Профиль" });
+        await sleep(DELAY.AFTER_BUTTON_CLICK);
+
+        const messages2 = await client.getMessages(BOT_USERNAME, { limit: 3 });
+        const profileMenu2 = messages2.find(
+          (m) => m.replyMarkup && m.text?.includes("Профиль"),
+        );
+
+        if (profileMenu2) {
+          await profileMenu2.click({ text: "🎁 Ежедневка" });
+          await sleep(DELAY.AFTER_BUTTON_CLICK);
+        }
+      }
+    } else {
+      // Failed to complete task, delay next daily
+      console.log(
+        "[DAILY] Failed to complete task, delaying next daily by 1 hour",
+      );
+      await updateAccount(userId, {
+        next_daily_time: getNextClickerTimeDelayed().toISOString(),
+        last_error: "Failed to complete required task for daily",
+      });
+      return;
+    }
+  }
+
+  // Check for captcha
+  const captchaMsg = messagesAfterClick.find((m) =>
+    m.text?.includes("ПРОВЕРКА НА РОБОТА"),
+  );
+
+  if (captchaMsg) {
+    console.log("[DAILY] Captcha detected, solving...");
+    const solved = await handleCaptcha(client, captchaMsg);
+    if (!solved) {
+      throw new Error("Failed to solve captcha in daily");
+    }
+  }
+
   // Get current counts
   const { data } = await supabase
     .from("accounts")
@@ -537,9 +605,8 @@ async function performDaily(client, userId) {
     .eq("user_id", userId)
     .single();
 
-  // Update next daily time and increment counter
+  // Update stats only (next_daily_time already updated)
   await updateAccount(userId, {
-    next_daily_time: getNextDailyTime().toISOString(),
     total_dailies: (data?.total_dailies || 0) + 1,
     last_daily_at: new Date().toISOString(),
     error_count: 0,
@@ -579,11 +646,19 @@ async function processAccount(account) {
 
     // Perform clicker if due
     if (clickerDue) {
+      // Update next_clicker_time IMMEDIATELY to prevent double execution
+      await updateAccount(user_id, {
+        next_clicker_time: getNextClickerTime().toISOString(),
+      });
       await performClicker(client, user_id);
     }
 
     // Perform daily if due
     if (dailyDue) {
+      // Update next_daily_time IMMEDIATELY to prevent double execution
+      await updateAccount(user_id, {
+        next_daily_time: getNextDailyTime().toISOString(),
+      });
       await performDaily(client, user_id);
     }
 
