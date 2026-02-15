@@ -9,7 +9,7 @@ const input = require("input");
 // ============================================
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY, // Use service role to bypass RLS
+  process.env.SUPABASE_SERVICE_ROLE_KEY // Use service role to bypass RLS
 );
 
 const BOT_USERNAME = "patrickstarsrobot";
@@ -68,9 +68,7 @@ async function loginAccount() {
     await client.start({
       phoneNumber: async () => phone,
       password: async () => {
-        const pwd = await input.text(
-          "🔒 Enter 2FA password (or press Enter to skip): ",
-        );
+        const pwd = await input.text("🔒 Enter 2FA password (or press Enter to skip): ");
         return pwd || undefined;
       },
       phoneCode: async () => {
@@ -147,14 +145,14 @@ VALUES (
     }
 
     // Cleanup
-    await client.disconnect();
+    await client.destroy();
     console.log("\n👋 Disconnected from Telegram");
     console.log("\n✨ Login complete! You can now run the main worker.\n");
   } catch (error) {
     console.error("\n❌ Login failed:", error.message);
-
+    
     try {
-      await client.disconnect();
+      await client.destroy();
     } catch (err) {
       // Ignore disconnect errors
     }

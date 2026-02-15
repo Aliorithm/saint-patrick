@@ -5,39 +5,6 @@ const { createClient } = require("@supabase/supabase-js");
 const express = require("express");
 
 // ============================================
-// SUPPRESS GRAMJS TIMEOUT ERRORS (known issue)
-// ============================================
-// Monkey-patch Error.prototype.toString to suppress TIMEOUT from gramjs
-const originalErrorToString = Error.prototype.toString;
-Error.prototype.toString = function() {
-  if (this.message === "TIMEOUT" && this.stack?.includes("updates.js")) {
-    return ""; // Return empty string for TIMEOUT errors from updates.js
-  }
-  return originalErrorToString.call(this);
-};
-
-// Override console.error to filter out TIMEOUT errors
-const originalConsoleError = console.error;
-console.error = function (...args) {
-  const message = args.join(" ");
-  if (message.includes("TIMEOUT") && message.includes("updates.js")) {
-    return;
-  }
-  originalConsoleError.apply(console, args);
-};
-
-// Suppress unhandled rejections
-process.on("unhandledRejection", (reason) => {
-  if (reason?.message === "TIMEOUT") return;
-  console.error("Unhandled Rejection:", reason);
-});
-
-process.on("uncaughtException", (error) => {
-  if (error?.message === "TIMEOUT") return;
-  console.error("Uncaught Exception:", error);
-});
-
-// ============================================
 // CONFIGURATION
 // ============================================
 const INSTANCE_ID = parseInt(process.env.INSTANCE_ID);
@@ -627,9 +594,9 @@ async function processAccount(account) {
     console.error(`❌ Error processing account ${user_id}:`, error.message);
     await incrementErrorCount(user_id, error.message);
   } finally {
-    // Always disconnect to free memory
+    // Always destroy client to properly stop it (not just disconnect)
     if (client) {
-      await client.disconnect();
+      await client.destroy();
       console.log(`🔌 Disconnected from account ${user_id}`);
     }
   }
