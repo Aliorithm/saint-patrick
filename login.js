@@ -33,6 +33,11 @@ function getNextDailyTime() {
   return new Date(Date.now() + hours * 60 * 60000);
 }
 
+// For first login, set clicker to run immediately (or in 1 minute)
+function getInitialClickerTime() {
+  return new Date(Date.now() + 60000); // 1 minute from now
+}
+
 // ============================================
 // LOGIN FUNCTION
 // ============================================
@@ -96,7 +101,7 @@ async function loginAccount() {
     console.log("\n🔑 Session string generated!");
 
     // Get next times
-    const nextClicker = getNextClickerTime();
+    const nextClicker = getInitialClickerTime(); // Start in 1 minute
     const nextDaily = getNextDailyTime();
 
     // Save to Supabase
