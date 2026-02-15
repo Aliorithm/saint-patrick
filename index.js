@@ -16,9 +16,9 @@ const API_HASH = process.env.API_HASH;
 const PORT = process.env.PORT || 10000;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const delay = () => 2000 + Math.random() * 2000; // 2-4s
+const delay = () => 4000 + Math.random() * 2000; // 4-6s
 
-const CLICKER_MIN = 10;
+const CLICKER_MIN = 7;
 const CLICKER_MAX = 5;
 const DAILY = 24 * 60;
 
@@ -201,30 +201,50 @@ async function handleTasks(client, userId) {
         await sleep(2000);
         
         try {
+          let result;
           if (identifier.startsWith("+")) {
             // Private channel - use invite hash
             const hash = identifier.substring(1); // Remove '+'
             console.log(`[TASK] Using invite hash: ${hash}`);
-            await client.invoke(
+            result = await client.invoke(
               new Api.messages.ImportChatInvite({
                 hash: hash,
               })
             );
           } else {
             // Public channel - use username
-            await client.invoke(
+            result = await client.invoke(
               new Api.channels.JoinChannel({
                 channel: identifier,
               })
             );
           }
-          entity = { type: "channel", name: identifier };
-          console.log("[TASK] Join successful");
+          // Get the channel entity from result
+          const channelEntity = result.chats?.[0];
+          if (channelEntity) {
+            entity = { type: "channel", name: channelEntity };
+            console.log("[TASK] Join successful");
+          } else {
+            console.log("[TASK] Join successful but no entity returned");
+          }
         } catch (e) {
           // USER_ALREADY_PARTICIPANT and INVITE_REQUEST_SENT are both success!
           if (e.message.includes("USER_ALREADY_PARTICIPANT") || e.message.includes("INVITE_REQUEST_SENT")) {
             console.log("[TASK] Already joined or request sent (success)");
-            entity = { type: "channel", name: identifier };
+            // For public channels, try to get entity by username
+            if (!identifier.startsWith("+")) {
+              try {
+                const channelEntity = await client.getEntity(identifier);
+                entity = { type: "channel", name: channelEntity };
+              } catch {
+                // If getEntity fails, we're already in it but can't leave - skip
+                console.log("[TASK] Cannot get entity for leaving");
+              }
+            } else {
+              // For private channels already joined, we can't easily get the entity
+              // Would need to search through dialogs which is expensive
+              console.log("[TASK] Private channel already joined - cannot leave");
+            }
           } else {
             console.log(`[TASK] Join failed: ${e.message}`);
           }
@@ -374,8 +394,14 @@ async function doClicker(client, userId) {
   await sleep(delay());
   await solveCaptcha(client);
 
+  // Get current total_clicks to increment
+  const { data } = await supabase.from("accounts").select("total_clicks").eq("user_id", userId).single();
+  const totalClicks = (data?.total_clicks || 0) + 1;
+
   await updateAccount(userId, {
     next_clicker_time: new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
+    last_click_at: new Date().toISOString(),
+    total_clicks: totalClicks,
     error_count: 0,
     last_error: null,
   });
@@ -404,8 +430,14 @@ async function doDaily(client, userId) {
   await sleep(delay());
   await solveCaptcha(client);
 
+  // Get current total_dailies to increment
+  const { data } = await supabase.from("accounts").select("total_dailies").eq("user_id", userId).single();
+  const totalDailies = (data?.total_dailies || 0) + 1;
+
   await updateAccount(userId, {
     next_daily_time: new Date(Date.now() + DAILY * 60000).toISOString(),
+    last_daily_at: new Date().toISOString(),
+    total_dailies: totalDailies,
     error_count: 0,
     last_error: null,
   });
@@ -418,7 +450,7 @@ async function doDaily(client, userId) {
 // PROCESS
 // ============================================
 async function processAccount(acc) {
-  console.log(`\n━━━ Account ${acc.user_id} ━━━`);
+  console.log(`\n━━━ Account ${acc.phone} ━━━`);
   
   let client;
   try {
