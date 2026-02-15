@@ -18,6 +18,10 @@ const PORT = process.env.PORT || 10000;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const delay = () => 2000 + Math.random() * 2000; // 2-4s
 
+const CLICKER_MIN = 10;
+const CLICKER_MAX = 5;
+const DAILY = 24 * 60;
+
 // ============================================
 // SUPABASE
 // ============================================
@@ -342,7 +346,7 @@ async function doClicker(client, userId) {
     if (popup?.includes("завтра") || popup?.includes("слишком много")) {
       console.log("[CLICKER] ⚠️ Daily limit reached!");
       await updateAccount(userId, {
-        next_clicker_time: new Date(Date.now() + 24 * 60 * 60000).toISOString(),
+        next_clicker_time: new Date(Date.now() + DAILY * 60000).toISOString(),
         last_error: "Daily limit: Ты слишком много кликал",
       });
       return false;
@@ -371,7 +375,7 @@ async function doClicker(client, userId) {
   await solveCaptcha(client);
 
   await updateAccount(userId, {
-    next_clicker_time: new Date(Date.now() + (6 + Math.random() * 5) * 60000).toISOString(),
+    next_clicker_time: new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
     error_count: 0,
     last_error: null,
   });
@@ -401,7 +405,7 @@ async function doDaily(client, userId) {
   await solveCaptcha(client);
 
   await updateAccount(userId, {
-    next_daily_time: new Date(Date.now() + 24 * 60 * 60000).toISOString(),
+    next_daily_time: new Date(Date.now() + DAILY * 60000).toISOString(),
     error_count: 0,
     last_error: null,
   });
@@ -432,14 +436,14 @@ async function processAccount(acc) {
 
     if (clickerDue) {
       await updateAccount(acc.user_id, {
-        next_clicker_time: new Date(Date.now() + (6 + Math.random() * 5) * 60000).toISOString()
+        next_clicker_time: new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString()
       });
       await doClicker(client, acc.user_id);
     }
 
     if (dailyDue) {
       await updateAccount(acc.user_id, {
-        next_daily_time: new Date(Date.now() + 24 * 60 * 60000).toISOString()
+        next_daily_time: new Date(Date.now() + DAILY * 60000).toISOString()
       });
       await doDaily(client, acc.user_id);
     }
