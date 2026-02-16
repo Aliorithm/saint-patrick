@@ -27,27 +27,12 @@ const DAILY = 24 * 60;
 // ============================================
 async function getAccountsDue() {
   const now = new Date().toISOString();
-  
-  // Atomically update and fetch accounts to prevent race conditions
-  const { data, error } = await supabase.rpc('claim_due_accounts', {
-    p_instance_id: INSTANCE_ID,
-    p_now: now,
-    p_clicker_delay: CLICKER_MIN + Math.random() * CLICKER_MAX,
-    p_daily_delay: DAILY
-  });
-  
-  // If RPC doesn't exist, fall back to old method (will have race conditions)
-  if (error?.code === '42883') {
-    console.log('⚠️ claim_due_accounts function not found, using fallback (has race conditions)');
-    const { data: fallbackData } = await supabase
-      .from("accounts")
-      .select("*")
-      .eq("instance_id", INSTANCE_ID)
-      .eq("is_active", true)
-      .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now}`);
-    return fallbackData || [];
-  }
-  
+  const { data } = await supabase
+    .from("accounts")
+    .select("*")
+    .eq("instance_id", INSTANCE_ID)
+    .eq("is_active", true)
+    .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now}`);
   return data || [];
 }
 
