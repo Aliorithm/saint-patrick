@@ -19,7 +19,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const delay = () => 4000 + Math.random() * 2000; // 4-6s
 
 const CLICKER_MIN = 10;
-const CLICKER_MAX = 5;
+const CLICKER_MAX = 10;
 const DAILY = 24 * 60;
 
 // ============================================
@@ -420,8 +420,9 @@ async function doClicker(client, userId) {
       
       if (popup?.includes("завтра") || popup?.includes("слишком много")) {
         console.log("[CLICKER] ⚠️ Daily limit reached!");
+        const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
         await updateAccount(userId, {
-          next_clicker_time: new Date(Date.now() + 8 * 60 * 60000).toISOString(), // 8 hours
+          next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
           last_error: "Daily limit: Ты слишком много кликал",
         });
         throw new Error("DAILY_LIMIT");
@@ -567,9 +568,10 @@ async function processAccount(acc) {
       } catch (notifyError) {
         console.log(`Failed to notify admin: ${notifyError.message}`);
       }
-      // Delay next clicker time by 8 hours
+      // Delay next clicker time by 10 hours + clicker randomization
+      const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
       await updateAccount(acc.user_id, {
-        next_clicker_time: new Date(Date.now() + 8 * 60 * 60000).toISOString(), // 8 hours
+        next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
         last_error: "Sponsor subscription required",
       });
     } else {
