@@ -19,7 +19,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const delay = () => 4000 + Math.random() * 2000; // 4-6s
 
 const CLICKER_MIN = 10;
-const CLICKER_MAX = 10;
+const CLICKER_MAX = 5;
 const DAILY = 24 * 60;
 
 // ============================================
@@ -159,6 +159,8 @@ async function solveCaptcha(client) {
     "Виноград": "🍇", "виноград": "🍇",
     "Яблоко": "🍎", "яблоко": "🍎",
     "Вишня": "🍒", "вишня": "🍒",
+    "Кокос": "🥥", "кокос": "🥥",
+    "Помидор": "🍅", "помидор": "🍅",
   };
 
   let targetEmoji = null;
