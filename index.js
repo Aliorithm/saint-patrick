@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 10000;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const delay = () => 4000 + Math.random() * 2000; // 4-6s
 
-const CLICKER_MIN = 7;
+const CLICKER_MIN = 10;
 const CLICKER_MAX = 5;
 const DAILY = 24 * 60;
 
