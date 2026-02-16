@@ -19,7 +19,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const delay = () => 4000 + Math.random() * 2000; // 4-6s
 
 const CLICKER_MIN = 10;
-const CLICKER_MAX = 5;
+const CLICKER_MAX = 7;
 const DAILY = 24 * 60;
 
 // ============================================
@@ -106,9 +106,13 @@ async function ensureMenu(client) {
     menu = await getMainMenu(client);
   }
   
-  // Check for sponsor subscription requirement
+  // Check for sponsor subscription requirement (NOT regular tasks)
   const msgs = await client.getMessages(BOT, { limit: 3 });
-  const sponsorMsg = msgs.find(m => m.text?.includes("Подпишись на наших спонсоров") || m.text?.includes("Подпишись"));
+  const sponsorMsg = msgs.find(m => 
+    (m.text?.includes("Подпишись на наших спонсоров") || 
+     m.text?.includes("Чтобы активировать бота")) &&
+    !m.text?.includes("Новое задание") // Exclude task messages
+  );
   if (sponsorMsg) {
     console.log("[SPONSOR] Subscription required detected!");
     throw new Error("SPONSOR_SUBSCRIPTION_REQUIRED");
@@ -288,6 +292,14 @@ async function handleTasks(client, userId) {
               console.log("[TASK] Join successful but no entity returned");
             }
           } catch (e) {
+            // Check for channel limit (500 channels)
+            // GramJS may format this as error message or error code
+            const errorText = (e.message || e.errorMessage || '').toUpperCase();
+            if (errorText.includes("CHANNELS_TOO_MUCH") || errorText.includes("TOO MANY CHANNELS")) {
+              console.log("[TASK] ❌ Channel limit reached (500 channels)!");
+              throw new Error("CHANNELS_TOO_MUCH");
+            }
+            
             if (e.message.includes("USER_ALREADY_PARTICIPANT") || e.message.includes("INVITE_REQUEST_SENT")) {
               console.log("[TASK] Already joined or request sent (success)");
               if (!identifier.startsWith("+")) {
@@ -298,7 +310,7 @@ async function handleTasks(client, userId) {
                   console.log("[TASK] Cannot get entity for leaving");
                 }
               } else {
-                console.log("[TASK] Private channel already joined - cannot leave");
+                console.log("[TASK] Private channel already joined");
               }
             } else {
               console.log(`[TASK] Join failed: ${e.message}`);
@@ -383,19 +395,6 @@ async function handleTasks(client, userId) {
       });
     } else {
       break;
-    }
-  }
-
-  // Leave channels
-  for (const entity of joined) {
-    if (entity.type === "channel") {
-      try {
-        await sleep(1000);
-        await client.invoke(new Api.channels.LeaveChannel({ channel: entity.name }));
-        console.log(`[TASK] Left ${entity.name}`);
-      } catch (e) {
-        console.log(`[TASK] Leave failed: ${e.message}`);
-      }
     }
   }
 
@@ -547,8 +546,24 @@ async function processAccount(acc) {
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
     
-    // Special handling for sponsor subscription
-    if (error.message === "SPONSOR_SUBSCRIPTION_REQUIRED") {
+    // Special handling for channel limit (500 channels)
+    if (error.message === "CHANNELS_TOO_MUCH") {
+      console.log("[CHANNEL_LIMIT] Notifying admin...");
+      try {
+        const limitNotification = `🚨 Channel Limit Reached (500)\n\nInstance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser ID: ${acc.user_id}\n\nAccount has reached the 500 channel limit and cannot join more channels.\n\nTime: ${new Date().toLocaleString()}`;
+        if (client) {
+          await client.sendMessage(ADMIN, { message: limitNotification });
+        }
+      } catch (notifyError) {
+        console.log(`Failed to notify admin: ${notifyError.message}`);
+      }
+      // Delay next clicker time by 10 hours
+      const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
+      await updateAccount(acc.user_id, {
+        next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
+        last_error: "Channel limit reached (500 channels)",
+      });
+    } else if (error.message === "SPONSOR_SUBSCRIPTION_REQUIRED") {
       console.log("[SPONSOR] Notifying admin...");
       try {
         const sponsorNotification = `🚨 Sponsor Subscription Required\n\nInstance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser ID: ${acc.user_id}\n\nThe bot is asking to subscribe to sponsors (Подпишись на наших спонсоров).\n\nTime: ${new Date().toLocaleString()}`;
