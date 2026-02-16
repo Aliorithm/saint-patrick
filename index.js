@@ -99,10 +99,21 @@ async function getMainMenu(client) {
 async function ensureMenu(client) {
   let menu = await getMainMenu(client);
   if (!menu) {
-    await client.sendMessage(BOT, { message: "/start" });
-    await sleep(4000);
+    await withCaptcha(client, async () => {
+      await client.sendMessage(BOT, { message: "/start" });
+      await sleep(4000);
+    });
     menu = await getMainMenu(client);
   }
+  
+  // Check for sponsor subscription requirement
+  const msgs = await client.getMessages(BOT, { limit: 3 });
+  const sponsorMsg = msgs.find(m => m.text?.includes("Подпишись на наших спонсоров") || m.text?.includes("Подпишись"));
+  if (sponsorMsg) {
+    console.log("[SPONSOR] Subscription required detected!");
+    throw new Error("SPONSOR_SUBSCRIPTION_REQUIRED");
+  }
+  
   return menu;
 }
 
@@ -114,24 +125,73 @@ async function solveCaptcha(client) {
   const captcha = msgs.find(m => m.text?.includes("ПРОВЕРКА НА РОБОТА"));
   if (!captcha) return true;
 
-  const match = captcha.text.match(/(\d+)\s*([\+\-\*\/])\s*(\d+)/);
-  if (!match) return false;
+  console.log("[CAPTCHA] Detected!");
 
-  const [, a, op, b] = match;
-  const answer = eval(`${a}${op}${b}`);
-  console.log(`[CAPTCHA] ${a} ${op} ${b} = ${answer}`);
+  // Check for math captcha
+  const mathMatch = captcha.text.match(/(\d+)\s*([\+\-\*\/])\s*(\d+)/);
+  if (mathMatch) {
+    const [, a, op, b] = mathMatch;
+    const answer = eval(`${a}${op}${b}`);
+    console.log(`[CAPTCHA] Math: ${a} ${op} ${b} = ${answer}`);
 
-  await sleep(3000 + Math.random() * 3000);
+    await sleep(3000 + Math.random() * 3000);
 
-  for (const row of captcha.replyMarkup.rows) {
-    for (const btn of row.buttons) {
-      if (btn.text === answer.toString()) {
-        await captcha.click({ data: btn.data });
-        return true;
+    for (const row of captcha.replyMarkup.rows) {
+      for (const btn of row.buttons) {
+        if (btn.text === answer.toString()) {
+          await captcha.click({ data: btn.data });
+          console.log("[CAPTCHA] Solved ✅");
+          await sleep(2000);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Check for fruit emoji captcha
+  const fruitMap = {
+    "Киви": "🥝", "киви": "🥝",
+    "Банан": "🍌", "банан": "🍌",
+    "Арбуз": "🍉", "арбуз": "🍉",
+    "Апельсин": "🍊", "апельсин": "🍊",
+    "Клубника": "🍓", "клубника": "🍓",
+    "Виноград": "🍇", "виноград": "🍇",
+    "Яблоко": "🍎", "яблоко": "🍎",
+    "Вишня": "🍒", "вишня": "🍒",
+  };
+
+  let targetEmoji = null;
+  for (const [name, emoji] of Object.entries(fruitMap)) {
+    if (captcha.text.includes(name)) {
+      targetEmoji = emoji;
+      console.log(`[CAPTCHA] Fruit: ${name} = ${emoji}`);
+      break;
+    }
+  }
+
+  if (targetEmoji) {
+    await sleep(3000 + Math.random() * 3000);
+    for (const row of captcha.replyMarkup.rows) {
+      for (const btn of row.buttons) {
+        if (btn.text === targetEmoji) {
+          await captcha.click({ data: btn.data });
+          console.log("[CAPTCHA] Solved ✅");
+          await sleep(2000);
+          return true;
+        }
       }
     }
   }
+
   return false;
+}
+
+// Auto-solve captcha after any action
+async function withCaptcha(client, action) {
+  await action();
+  await sleep(1500);
+  await solveCaptcha(client);
 }
 
 // ============================================
@@ -141,9 +201,11 @@ async function handleTasks(client, userId) {
   console.log("[TASK] Starting...");
   
   const menu = await ensureMenu(client);
-  await sleep(delay());
-  await menu.click({ text: "📝 Задания" });
-  await sleep(delay());
+  await withCaptcha(client, async () => {
+    await sleep(delay());
+    await menu.click({ text: "📝 Задания" });
+    await sleep(delay());
+  });
 
   const joined = [];
   let completed = 0;
@@ -188,8 +250,10 @@ async function handleTasks(client, userId) {
       if (match) {
         const [, bot, param] = match;
         console.log(`[TASK] Bot: @${bot}`);
-        await sleep(2000);
-        await client.sendMessage(bot, { message: `/start ${param}` });
+        await withCaptcha(client, async () => {
+          await sleep(2000);
+          await client.sendMessage(bot, { message: `/start ${param}` });
+        });
         entity = { type: "bot", name: bot };
       }
     } else if (!url.includes("startapp")) {
@@ -198,57 +262,47 @@ async function handleTasks(client, userId) {
       if (match) {
         const identifier = match[1];
         console.log(`[TASK] Channel: ${identifier}`);
-        await sleep(2000);
         
-        try {
-          let result;
-          if (identifier.startsWith("+")) {
-            // Private channel - use invite hash
-            const hash = identifier.substring(1); // Remove '+'
-            console.log(`[TASK] Using invite hash: ${hash}`);
-            result = await client.invoke(
-              new Api.messages.ImportChatInvite({
-                hash: hash,
-              })
-            );
-          } else {
-            // Public channel - use username
-            result = await client.invoke(
-              new Api.channels.JoinChannel({
-                channel: identifier,
-              })
-            );
-          }
-          // Get the channel entity from result
-          const channelEntity = result.chats?.[0];
-          if (channelEntity) {
-            entity = { type: "channel", name: channelEntity };
-            console.log("[TASK] Join successful");
-          } else {
-            console.log("[TASK] Join successful but no entity returned");
-          }
-        } catch (e) {
-          // USER_ALREADY_PARTICIPANT and INVITE_REQUEST_SENT are both success!
-          if (e.message.includes("USER_ALREADY_PARTICIPANT") || e.message.includes("INVITE_REQUEST_SENT")) {
-            console.log("[TASK] Already joined or request sent (success)");
-            // For public channels, try to get entity by username
-            if (!identifier.startsWith("+")) {
-              try {
-                const channelEntity = await client.getEntity(identifier);
-                entity = { type: "channel", name: channelEntity };
-              } catch {
-                // If getEntity fails, we're already in it but can't leave - skip
-                console.log("[TASK] Cannot get entity for leaving");
+        await withCaptcha(client, async () => {
+          await sleep(2000);
+          try {
+            let result;
+            if (identifier.startsWith("+")) {
+              const hash = identifier.substring(1);
+              console.log(`[TASK] Using invite hash: ${hash}`);
+              result = await client.invoke(
+                new Api.messages.ImportChatInvite({ hash: hash })
+              );
+            } else {
+              result = await client.invoke(
+                new Api.channels.JoinChannel({ channel: identifier })
+              );
+            }
+            const channelEntity = result.chats?.[0];
+            if (channelEntity) {
+              entity = { type: "channel", name: channelEntity };
+              console.log("[TASK] Join successful");
+            } else {
+              console.log("[TASK] Join successful but no entity returned");
+            }
+          } catch (e) {
+            if (e.message.includes("USER_ALREADY_PARTICIPANT") || e.message.includes("INVITE_REQUEST_SENT")) {
+              console.log("[TASK] Already joined or request sent (success)");
+              if (!identifier.startsWith("+")) {
+                try {
+                  const channelEntity = await client.getEntity(identifier);
+                  entity = { type: "channel", name: channelEntity };
+                } catch {
+                  console.log("[TASK] Cannot get entity for leaving");
+                }
+              } else {
+                console.log("[TASK] Private channel already joined - cannot leave");
               }
             } else {
-              // For private channels already joined, we can't easily get the entity
-              // Would need to search through dialogs which is expensive
-              console.log("[TASK] Private channel already joined - cannot leave");
+              console.log(`[TASK] Join failed: ${e.message}`);
             }
-          } else {
-            console.log(`[TASK] Join failed: ${e.message}`);
           }
-        }
+        });
       }
     } else {
       console.log("[TASK] Web app - will try verify anyway");
@@ -283,11 +337,11 @@ async function handleTasks(client, userId) {
             console.log("[TASK] Found failure in messages");
           } else {
             console.log("[TASK] No clear result, assuming success");
-            popup = "✅ Задание выполнено"; // Assume success if we joined
+            popup = "✅ Задание выполнено";
           }
         } else {
           console.log(`[TASK] Callback error: ${e.message} - assuming success`);
-          popup = "✅ Задание выполнено"; // Assume success
+          popup = "✅ Задание выполнено";
         }
       }
 
@@ -295,7 +349,6 @@ async function handleTasks(client, userId) {
         console.log("[TASK] ✅ Success!");
         if (entity) joined.push(entity);
         completed++;
-        // Bot says "2 tasks" but 1 is enough - break here!
         console.log("[TASK] Task completed, that's enough!");
         break;
       }
@@ -303,27 +356,29 @@ async function handleTasks(client, userId) {
       if (popup?.includes("не найдена")) {
         console.log("[TASK] ❌ Failed");
         if (buttons.skip) {
-          await sleep(1500);
-          await taskMsg.click({ data: buttons.skip.data });
-          await sleep(2000);
+          await withCaptcha(client, async () => {
+            await sleep(1500);
+            await taskMsg.click({ data: buttons.skip.data });
+            await sleep(2000);
+          });
           continue;
         }
       }
       
-      // If we get here and we joined something, assume success
       if (entity) {
         console.log("[TASK] ✅ Joined but unclear result - assuming success");
         joined.push(entity);
         completed++;
-        break; // That's enough
+        break;
       }
     }
 
-    // If we get here, something went wrong - skip
     if (buttons.skip) {
-      await sleep(1500);
-      await taskMsg.click({ data: buttons.skip.data });
-      await sleep(2000);
+      await withCaptcha(client, async () => {
+        await sleep(1500);
+        await taskMsg.click({ data: buttons.skip.data });
+        await sleep(2000);
+      });
     } else {
       break;
     }
@@ -353,37 +408,51 @@ async function doClicker(client, userId) {
   console.log("[CLICKER] Starting...");
   
   const menu = await ensureMenu(client);
-  await sleep(delay());
   
-  const clickerBtn = findButton(menu, "Кликер");
-  if (!clickerBtn?.data) {
-    await menu.click({ text: "✨ Кликер" });
-  } else {
-    const popup = await getCallbackAnswer(client, menu, clickerBtn.data);
-    console.log(`[CLICKER] Popup: ${popup || "none"}`);
-    
-    // Check for daily limit FIRST
-    if (popup?.includes("завтра") || popup?.includes("слишком много")) {
-      console.log("[CLICKER] ⚠️ Daily limit reached!");
-      await updateAccount(userId, {
-        next_clicker_time: new Date(Date.now() + DAILY * 60000).toISOString(),
-        last_error: "Daily limit: Ты слишком много кликал",
-      });
-      return false;
-    }
-    
-    // Check for task required
-    if (popup?.includes("выполни хотя бы")) {
-      console.log("[CLICKER] Task required!");
-      const ok = await handleTasks(client, userId);
+  await withCaptcha(client, async () => {
+    await sleep(delay());
+    const clickerBtn = findButton(menu, "Кликер");
+    if (!clickerBtn?.data) {
+      await menu.click({ text: "✨ Кликер" });
+    } else {
+      const popup = await getCallbackAnswer(client, menu, clickerBtn.data);
+      console.log(`[CLICKER] Popup: ${popup || "none"}`);
       
+      if (popup?.includes("завтра") || popup?.includes("слишком много")) {
+        console.log("[CLICKER] ⚠️ Daily limit reached!");
+        await updateAccount(userId, {
+          next_clicker_time: new Date(Date.now() + 8 * 60 * 60000).toISOString(), // 8 hours
+          last_error: "Daily limit: Ты слишком много кликал",
+        });
+        throw new Error("DAILY_LIMIT");
+      }
+      
+      if (popup?.includes("выполни хотя бы")) {
+        console.log("[CLICKER] Task required!");
+        throw new Error("TASK_REQUIRED");
+      }
+    }
+  });
+
+  // Handle special cases
+  try {
+    // Already handled in withCaptcha above
+  } catch (e) {
+    if (e.message === "DAILY_LIMIT") return false;
+    if (e.message === "TASK_REQUIRED") {
+      const ok = await handleTasks(client, userId);
       if (ok) {
         console.log("[CLICKER] Tasks done, clicking again...");
-        await sleep(delay());
-        await client.sendMessage(BOT, { message: "/start" });
-        await sleep(4000);
+        await withCaptcha(client, async () => {
+          await sleep(delay());
+          await client.sendMessage(BOT, { message: "/start" });
+          await sleep(4000);
+        });
         const menu2 = await ensureMenu(client);
-        await menu2.click({ text: "✨ Кликер" });
+        await withCaptcha(client, async () => {
+          await sleep(delay());
+          await menu2.click({ text: "✨ Кликер" });
+        });
       } else {
         console.log("[CLICKER] Tasks failed");
         return false;
@@ -394,7 +463,6 @@ async function doClicker(client, userId) {
   await sleep(delay());
   await solveCaptcha(client);
 
-  // Get current total_clicks to increment
   const { data } = await supabase.from("accounts").select("total_clicks").eq("user_id", userId).single();
   const totalClicks = (data?.total_clicks || 0) + 1;
 
@@ -417,20 +485,22 @@ async function doDaily(client, userId) {
   console.log("[DAILY] Starting...");
   
   const menu = await ensureMenu(client);
-  await sleep(delay());
-  await menu.click({ text: "👤 Профиль" });
-  await sleep(delay());
+  await withCaptcha(client, async () => {
+    await sleep(delay());
+    await menu.click({ text: "👤 Профиль" });
+    await sleep(delay());
+  });
 
   const msgs = await client.getMessages(BOT, { limit: 3 });
   const profile = msgs.find(m => m.replyMarkup && m.text?.includes("Профиль"));
   
   if (!profile) throw new Error("Profile not found");
 
-  await profile.click({ text: "🎁 Ежедневка" });
-  await sleep(delay());
-  await solveCaptcha(client);
+  await withCaptcha(client, async () => {
+    await profile.click({ text: "🎁 Ежедневка" });
+    await sleep(delay());
+  });
 
-  // Get current total_dailies to increment
   const { data } = await supabase.from("accounts").select("total_dailies").eq("user_id", userId).single();
   const totalDailies = (data?.total_dailies || 0) + 1;
 
@@ -485,11 +555,30 @@ async function processAccount(acc) {
     }
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
-    await incrementError(acc.user_id, error.message);
     
-    // Send notification to admin
-    if (client) {
-      await sendErrorNotification(client, acc.user_id, error.message, acc.phone);
+    // Special handling for sponsor subscription
+    if (error.message === "SPONSOR_SUBSCRIPTION_REQUIRED") {
+      console.log("[SPONSOR] Notifying admin...");
+      try {
+        const sponsorNotification = `🚨 Sponsor Subscription Required\n\nInstance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser ID: ${acc.user_id}\n\nThe bot is asking to subscribe to sponsors (Подпишись на наших спонсоров).\n\nTime: ${new Date().toLocaleString()}`;
+        if (client) {
+          await client.sendMessage(ADMIN, { message: sponsorNotification });
+        }
+      } catch (notifyError) {
+        console.log(`Failed to notify admin: ${notifyError.message}`);
+      }
+      // Delay next clicker time by 8 hours
+      await updateAccount(acc.user_id, {
+        next_clicker_time: new Date(Date.now() + 8 * 60 * 60000).toISOString(), // 8 hours
+        last_error: "Sponsor subscription required",
+      });
+    } else {
+      await incrementError(acc.user_id, error.message);
+      
+      // Send notification to admin
+      if (client) {
+        await sendErrorNotification(client, acc.user_id, error.message, acc.phone);
+      }
     }
   } finally {
     if (client) {
