@@ -27,12 +27,27 @@ const DAILY = 24 * 60;
 // ============================================
 async function getAccountsDue() {
   const now = new Date().toISOString();
-  const { data } = await supabase
-    .from("accounts")
-    .select("*")
-    .eq("instance_id", INSTANCE_ID)
-    .eq("is_active", true)
-    .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now}`);
+  
+  // Atomically update and fetch accounts to prevent race conditions
+  const { data, error } = await supabase.rpc('claim_due_accounts', {
+    p_instance_id: INSTANCE_ID,
+    p_now: now,
+    p_clicker_delay: CLICKER_MIN + Math.random() * CLICKER_MAX,
+    p_daily_delay: DAILY
+  });
+  
+  // If RPC doesn't exist, fall back to old method (will have race conditions)
+  if (error?.code === '42883') {
+    console.log('⚠️ claim_due_accounts function not found, using fallback (has race conditions)');
+    const { data: fallbackData } = await supabase
+      .from("accounts")
+      .select("*")
+      .eq("instance_id", INSTANCE_ID)
+      .eq("is_active", true)
+      .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now}`);
+    return fallbackData || [];
+  }
+  
   return data || [];
 }
 
@@ -411,55 +426,49 @@ async function doClicker(client, userId) {
   
   const menu = await ensureMenu(client);
   
+  let popup = null;
   await withCaptcha(client, async () => {
     await sleep(delay());
     const clickerBtn = findButton(menu, "Кликер");
     if (!clickerBtn?.data) {
       await menu.click({ text: "✨ Кликер" });
     } else {
-      const popup = await getCallbackAnswer(client, menu, clickerBtn.data);
+      popup = await getCallbackAnswer(client, menu, clickerBtn.data);
       console.log(`[CLICKER] Popup: ${popup || "none"}`);
-      
-      if (popup?.includes("завтра") || popup?.includes("слишком много")) {
-        console.log("[CLICKER] ⚠️ Daily limit reached!");
-        const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
-        await updateAccount(userId, {
-          next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
-          last_error: "Daily limit: Ты слишком много кликал",
-        });
-        throw new Error("DAILY_LIMIT");
-      }
-      
-      if (popup?.includes("выполни хотя бы")) {
-        console.log("[CLICKER] Task required!");
-        throw new Error("TASK_REQUIRED");
-      }
     }
   });
 
-  // Handle special cases
-  try {
-    // Already handled in withCaptcha above
-  } catch (e) {
-    if (e.message === "DAILY_LIMIT") return false;
-    if (e.message === "TASK_REQUIRED") {
-      const ok = await handleTasks(client, userId);
-      if (ok) {
-        console.log("[CLICKER] Tasks done, clicking again...");
-        await withCaptcha(client, async () => {
-          await sleep(delay());
-          await client.sendMessage(BOT, { message: "/start" });
-          await sleep(4000);
-        });
-        const menu2 = await ensureMenu(client);
-        await withCaptcha(client, async () => {
-          await sleep(delay());
-          await menu2.click({ text: "✨ Кликер" });
-        });
-      } else {
-        console.log("[CLICKER] Tasks failed");
-        return false;
-      }
+  // Check for daily limit
+  if (popup?.includes("завтра") || popup?.includes("слишком много")) {
+    console.log("[CLICKER] ⚠️ Daily limit reached!");
+    const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
+    await updateAccount(userId, {
+      next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
+      last_error: "Daily limit: Ты слишком много кликал",
+    });
+    return false;
+  }
+  
+  // Check for task required
+  if (popup?.includes("выполни хотя бы")) {
+    console.log("[CLICKER] Task required!");
+    const ok = await handleTasks(client, userId);
+    
+    if (ok) {
+      console.log("[CLICKER] Tasks done, clicking again...");
+      await withCaptcha(client, async () => {
+        await sleep(delay());
+        await client.sendMessage(BOT, { message: "/start" });
+        await sleep(4000);
+      });
+      const menu2 = await ensureMenu(client);
+      await withCaptcha(client, async () => {
+        await sleep(delay());
+        await menu2.click({ text: "✨ Кликер" });
+      });
+    } else {
+      console.log("[CLICKER] Tasks failed");
+      return false;
     }
   }
 
@@ -540,16 +549,10 @@ async function processAccount(acc) {
     const dailyDue = new Date(acc.next_daily_time) <= now;
 
     if (clickerDue) {
-      await updateAccount(acc.user_id, {
-        next_clicker_time: new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString()
-      });
       await doClicker(client, acc.user_id);
     }
 
     if (dailyDue) {
-      await updateAccount(acc.user_id, {
-        next_daily_time: new Date(Date.now() + DAILY * 60000).toISOString()
-      });
       await doDaily(client, acc.user_id);
     }
 
