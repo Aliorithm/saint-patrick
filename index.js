@@ -10,29 +10,53 @@ const express = require("express");
 const INSTANCE_ID = parseInt(process.env.INSTANCE_ID);
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const BOT = "patrickstarsrobot";
-const ADMIN = "Aliorythm"; // Admin username for error notifications
+const ADMIN = "Aliorythm";
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const PORT = process.env.PORT || 10000;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const delay = () => 4000 + Math.random() * 2000; // 4-6s
+const delay = () => 4000 + Math.random() * 2000;
 
-const CLICKER_MIN = 10;
-const CLICKER_MAX = 7;
+// TIME DELAYS (in minutes)
+const CLICKER_MIN = 8;
+const CLICKER_MAX = 10;
 const DAILY = 24 * 60;
+const CAP_LIMIT = 25;
+const CAP_DELAY = () => 120 + Math.floor(Math.random() * 181); // 2h to 5h random
+const DAILY_LIMIT_DELAY = 10 * 60;
+const SPONSOR_DELAY = 10 * 60;
+const CHANNEL_LIMIT_DELAY = 10 * 60;
+const NO_TASKS_DELAY = 30;
 
 // ============================================
 // SUPABASE
 // ============================================
 async function getAccountsDue() {
   const now = new Date().toISOString();
-  const { data } = await supabase
-    .from("accounts")
-    .select("*")
-    .eq("instance_id", INSTANCE_ID)
-    .eq("is_active", true)
-    .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now}`);
+  
+  // Use atomic claiming function to prevent race conditions
+  const { data, error } = await supabase.rpc('claim_due_accounts', {
+    p_instance_id: INSTANCE_ID,
+    p_now: now,
+    p_clicker_delay_min: CLICKER_MIN,
+    p_clicker_delay_max: CLICKER_MAX,
+    p_daily_delay: DAILY
+  });
+  
+  if (error) {
+    console.log(`[ERROR] claim_due_accounts failed: ${error.message}`);
+    console.log('[FALLBACK] Using simple query (race conditions possible)');
+    // Fallback to simple query if function doesn't exist
+    const { data: fallbackData } = await supabase
+      .from("accounts")
+      .select("*")
+      .eq("instance_id", INSTANCE_ID)
+      .eq("is_active", true)
+      .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now}`);
+    return fallbackData || [];
+  }
+  
   return data || [];
 }
 
@@ -53,11 +77,11 @@ async function incrementError(userId, error) {
   }
 }
 
-async function sendErrorNotification(client, userId, error, phone) {
+async function sendAdminNotification(client, title, details) {
   try {
-    const message = `⚠️ Error Alert\n\nInstance: ${INSTANCE_ID}\nUser: ${userId}\nPhone: ${phone || "unknown"}\nError: ${error}\n\nTime: ${new Date().toLocaleString()}`;
+    const message = `${title}\n\n${details}\n\nTime: ${new Date().toLocaleString()}`;
     await client.sendMessage(ADMIN, { message });
-    console.log(`📨 Error notification sent to @${ADMIN}`);
+    console.log(`📨 Notification sent to @${ADMIN}`);
   } catch (e) {
     console.log(`Failed to send notification: ${e.message}`);
   }
@@ -76,7 +100,10 @@ async function getCallbackAnswer(client, msg, buttonData) {
       })
     );
     return result.message || null;
-  } catch {
+  } catch (e) {
+    if (e.message?.includes("MESSAGE_ID_INVALID")) {
+      return "MESSAGE_EXPIRED";
+    }
     return null;
   }
 }
@@ -91,28 +118,25 @@ function findButton(msg, textPart) {
   return null;
 }
 
-async function getMainMenu(client) {
-  const msgs = await client.getMessages(BOT, { limit: 5 });
-  return msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
-}
-
 async function ensureMenu(client) {
-  let menu = await getMainMenu(client);
+  let msgs = await client.getMessages(BOT, { limit: 5 });
+  let menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
+  
   if (!menu) {
     await withCaptcha(client, async () => {
       await client.sendMessage(BOT, { message: "/start" });
       await sleep(4000);
     });
-    menu = await getMainMenu(client);
+    msgs = await client.getMessages(BOT, { limit: 5 });
+    menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
   }
   
-  // Check for sponsor subscription requirement (NOT regular tasks)
-  const msgs = await client.getMessages(BOT, { limit: 3 });
+  // Check for sponsor subscription (must have specific trigger AND no referral link context)
   const sponsorMsg = msgs.find(m => 
-    (m.text?.includes("Подпишись на наших спонсоров") || 
-     m.text?.includes("Чтобы активировать бота")) &&
-    !m.text?.includes("Новое задание") // Exclude task messages
+    m.text?.includes("Чтобы активировать бота:") &&
+    m.text?.includes("Подпишись на наших спонсоров")
   );
+  
   if (sponsorMsg) {
     console.log("[SPONSOR] Subscription required detected!");
     throw new Error("SPONSOR_SUBSCRIPTION_REQUIRED");
@@ -127,17 +151,16 @@ async function ensureMenu(client) {
 async function solveCaptcha(client) {
   const msgs = await client.getMessages(BOT, { limit: 3 });
   const captcha = msgs.find(m => m.text?.includes("ПРОВЕРКА НА РОБОТА"));
-  if (!captcha) return true;
+  if (!captcha) return false; // No captcha present
 
   console.log("[CAPTCHA] Detected!");
 
-  // Check for math captcha
+  // Math captcha
   const mathMatch = captcha.text.match(/(\d+)\s*([\+\-\*\/])\s*(\d+)/);
   if (mathMatch) {
     const [, a, op, b] = mathMatch;
     const answer = eval(`${a}${op}${b}`);
     console.log(`[CAPTCHA] Math: ${a} ${op} ${b} = ${answer}`);
-
     await sleep(3000 + Math.random() * 3000);
 
     for (const row of captcha.replyMarkup.rows) {
@@ -153,7 +176,7 @@ async function solveCaptcha(client) {
     return false;
   }
 
-  // Check for fruit emoji captcha
+  // Fruit emoji captcha
   const fruitMap = {
     "Киви": "🥝", "киви": "🥝",
     "Банан": "🍌", "банан": "🍌",
@@ -167,24 +190,19 @@ async function solveCaptcha(client) {
     "Помидор": "🍅", "помидор": "🍅",
   };
 
-  let targetEmoji = null;
   for (const [name, emoji] of Object.entries(fruitMap)) {
     if (captcha.text.includes(name)) {
-      targetEmoji = emoji;
       console.log(`[CAPTCHA] Fruit: ${name} = ${emoji}`);
-      break;
-    }
-  }
-
-  if (targetEmoji) {
-    await sleep(3000 + Math.random() * 3000);
-    for (const row of captcha.replyMarkup.rows) {
-      for (const btn of row.buttons) {
-        if (btn.text === targetEmoji) {
-          await captcha.click({ data: btn.data });
-          console.log("[CAPTCHA] Solved ✅");
-          await sleep(2000);
-          return true;
+      await sleep(3000 + Math.random() * 3000);
+      
+      for (const row of captcha.replyMarkup.rows) {
+        for (const btn of row.buttons) {
+          if (btn.text === emoji) {
+            await captcha.click({ data: btn.data });
+            console.log("[CAPTCHA] Solved ✅");
+            await sleep(2000);
+            return true;
+          }
         }
       }
     }
@@ -193,7 +211,6 @@ async function solveCaptcha(client) {
   return false;
 }
 
-// Auto-solve captcha after any action
 async function withCaptcha(client, action) {
   await action();
   await sleep(1500);
@@ -213,13 +230,20 @@ async function handleTasks(client, userId) {
     await sleep(delay());
   });
 
-  const joined = [];
+  // Check if no tasks available
+  let msgs = await client.getMessages(BOT, { limit: 3 });
+  if (msgs.find(m => m.text?.includes("выполнил все задания"))) {
+    console.log("[TASK] ⏰ No tasks available");
+    return "NO_TASKS_AVAILABLE";
+  }
+
   let completed = 0;
 
   for (let i = 0; i < 5; i++) {
     console.log(`[TASK] Attempt ${i + 1}/5`);
     
-    const msgs = await client.getMessages(BOT, { limit: 3 });
+    // ALWAYS get fresh messages
+    msgs = await client.getMessages(BOT, { limit: 3 });
     const taskMsg = msgs.find(m => m.text?.includes("Новое задание") && m.replyMarkup);
     
     if (!taskMsg) {
@@ -233,7 +257,6 @@ async function handleTasks(client, userId) {
       for (const btn of row.buttons) {
         if (btn.url && (btn.text.includes("бота") || btn.text.includes("Подпис") || btn.text.includes("приложение"))) {
           buttons.action = btn;
-          console.log(`[TASK] Action: ${btn.text}`);
         }
         if (btn.text?.includes("Подтвердить")) buttons.verify = btn;
         if (btn.text?.includes("Пропустить")) buttons.skip = btn;
@@ -246,12 +269,13 @@ async function handleTasks(client, userId) {
     }
 
     const url = buttons.action.url;
-    console.log(`[TASK] URL: ${url.substring(0, 50)}...`);
+    console.log(`[TASK] Action: ${buttons.action.text}`);
 
-    // Parse URL
+    // Handle different task types
     let entity = null;
+    
     if (url.includes("?start=") && !url.includes("startapp")) {
-      // Bot
+      // Bot task
       const match = url.match(/t\.me\/([^?]+)\?start=(.+)/);
       if (match) {
         const [, bot, param] = match;
@@ -260,10 +284,10 @@ async function handleTasks(client, userId) {
           await sleep(2000);
           await client.sendMessage(bot, { message: `/start ${param}` });
         });
-        entity = { type: "bot", name: bot };
+        entity = { type: "bot" };
       }
     } else if (!url.includes("startapp")) {
-      // Channel or Group
+      // Channel/Group task
       const match = url.match(/t\.me\/(.+)/);
       if (match) {
         const identifier = match[1];
@@ -272,46 +296,21 @@ async function handleTasks(client, userId) {
         await withCaptcha(client, async () => {
           await sleep(2000);
           try {
-            let result;
             if (identifier.startsWith("+")) {
-              const hash = identifier.substring(1);
-              console.log(`[TASK] Using invite hash: ${hash}`);
-              result = await client.invoke(
-                new Api.messages.ImportChatInvite({ hash: hash })
-              );
+              await client.invoke(new Api.messages.ImportChatInvite({ hash: identifier.substring(1) }));
             } else {
-              result = await client.invoke(
-                new Api.channels.JoinChannel({ channel: identifier })
-              );
+              await client.invoke(new Api.channels.JoinChannel({ channel: identifier }));
             }
-            const channelEntity = result.chats?.[0];
-            if (channelEntity) {
-              entity = { type: "channel", name: channelEntity };
-              console.log("[TASK] Join successful");
-            } else {
-              console.log("[TASK] Join successful but no entity returned");
-            }
+            console.log("[TASK] Joined");
+            entity = { type: "channel" };
           } catch (e) {
-            // Check for channel limit (500 channels)
-            // GramJS may format this as error message or error code
-            const errorText = (e.message || e.errorMessage || '').toUpperCase();
+            const errorText = (e.message || '').toUpperCase();
             if (errorText.includes("CHANNELS_TOO_MUCH") || errorText.includes("TOO MANY CHANNELS")) {
-              console.log("[TASK] ❌ Channel limit reached (500 channels)!");
               throw new Error("CHANNELS_TOO_MUCH");
             }
-            
-            if (e.message.includes("USER_ALREADY_PARTICIPANT") || e.message.includes("INVITE_REQUEST_SENT")) {
-              console.log("[TASK] Already joined or request sent (success)");
-              if (!identifier.startsWith("+")) {
-                try {
-                  const channelEntity = await client.getEntity(identifier);
-                  entity = { type: "channel", name: channelEntity };
-                } catch {
-                  console.log("[TASK] Cannot get entity for leaving");
-                }
-              } else {
-                console.log("[TASK] Private channel already joined");
-              }
+            if (e.message?.includes("USER_ALREADY_PARTICIPANT") || e.message?.includes("INVITE_REQUEST_SENT")) {
+              console.log("[TASK] Already joined");
+              entity = { type: "channel" };
             } else {
               console.log(`[TASK] Join failed: ${e.message}`);
             }
@@ -319,51 +318,44 @@ async function handleTasks(client, userId) {
         });
       }
     } else {
-      console.log("[TASK] Web app - will try verify anyway");
+      console.log("[TASK] Web app - will try verify");
     }
 
-    // Verify
+    // Verify task
     if (buttons.verify) {
       console.log("[TASK] Clicking verify...");
       await sleep(2000);
       
-      let popup = null;
-      try {
-        popup = await getCallbackAnswer(client, taskMsg, buttons.verify.data);
-        console.log(`[TASK] Popup: ${popup || "none"}`);
-      } catch (e) {
-        if (e.message.includes("MESSAGE_ID_INVALID")) {
-          console.log("[TASK] Message expired, checking messages...");
-          await sleep(1000);
-          const msgs = await client.getMessages(BOT, { limit: 3 });
-          const successMsg = msgs.find(m => 
-            m.text?.includes("выполнено") || m.text?.includes("получена")
-          );
-          const failMsg = msgs.find(m => 
-            m.text?.includes("не найдена")
-          );
-          
-          if (successMsg) {
-            popup = "✅ Задание выполнено";
-            console.log("[TASK] Found success in messages");
-          } else if (failMsg) {
-            popup = "❌ Подписка не найдена";
-            console.log("[TASK] Found failure in messages");
-          } else {
-            console.log("[TASK] No clear result, assuming success");
-            popup = "✅ Задание выполнено";
-          }
+      const popup = await getCallbackAnswer(client, taskMsg, buttons.verify.data);
+      
+      if (popup === "MESSAGE_EXPIRED") {
+        console.log("[TASK] Message expired, checking result...");
+        await sleep(1000);
+        msgs = await client.getMessages(BOT, { limit: 3 });
+        const successMsg = msgs.find(m => m.text?.includes("выполнено") || m.text?.includes("получена"));
+        
+        if (successMsg || entity) {
+          console.log("[TASK] ✅ Success!");
+          completed++;
+          break;
         } else {
-          console.log(`[TASK] Callback error: ${e.message} - assuming success`);
-          popup = "✅ Задание выполнено";
+          console.log("[TASK] ❌ Failed - skipping");
+          if (buttons.skip) {
+            await withCaptcha(client, async () => {
+              await sleep(1500);
+              await taskMsg.click({ data: buttons.skip.data });
+              await sleep(2000);
+            });
+          }
+          continue;
         }
       }
 
+      console.log(`[TASK] Popup: ${popup || "none"}`);
+      
       if (popup?.includes("выполнено") || popup?.includes("получена")) {
         console.log("[TASK] ✅ Success!");
-        if (entity) joined.push(entity);
         completed++;
-        console.log("[TASK] Task completed, that's enough!");
         break;
       }
 
@@ -375,18 +367,19 @@ async function handleTasks(client, userId) {
             await taskMsg.click({ data: buttons.skip.data });
             await sleep(2000);
           });
-          continue;
         }
+        continue;
       }
       
+      // If we joined but unclear result, assume success
       if (entity) {
-        console.log("[TASK] ✅ Joined but unclear result - assuming success");
-        joined.push(entity);
+        console.log("[TASK] ✅ Joined - assuming success");
         completed++;
         break;
       }
     }
 
+    // No verify button or something went wrong - skip
     if (buttons.skip) {
       await withCaptcha(client, async () => {
         await sleep(1500);
@@ -411,6 +404,8 @@ async function doClicker(client, userId) {
   const menu = await ensureMenu(client);
   
   let popup = null;
+  let captchaSolvedDuringClick = false;
+  
   await withCaptcha(client, async () => {
     await sleep(delay());
     const clickerBtn = findButton(menu, "Кликер");
@@ -421,14 +416,22 @@ async function doClicker(client, userId) {
       console.log(`[CLICKER] Popup: ${popup || "none"}`);
     }
   });
+  
+  // Check if captcha was already solved inside withCaptcha
+  const afterClickMsgs = await client.getMessages(BOT, { limit: 3 });
+  const captchaGone = !afterClickMsgs.find(m => m.text?.includes("ПРОВЕРКА НА РОБОТА"));
+  if (popup === null && captchaGone) {
+    // If popup was null, it means bot sent captcha instead of popup - captcha was solved
+    captchaSolvedDuringClick = true;
+  }
 
   // Check for daily limit
   if (popup?.includes("завтра") || popup?.includes("слишком много")) {
     console.log("[CLICKER] ⚠️ Daily limit reached!");
-    const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
+    const delayMinutes = DAILY_LIMIT_DELAY + (CLICKER_MIN + Math.random() * CLICKER_MAX);
     await updateAccount(userId, {
       next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
-      last_error: "Daily limit: Ты слишком много кликал",
+      last_error: "Daily limit",
     });
     return false;
   }
@@ -436,9 +439,18 @@ async function doClicker(client, userId) {
   // Check for task required
   if (popup?.includes("выполни хотя бы")) {
     console.log("[CLICKER] Task required!");
-    const ok = await handleTasks(client, userId);
+    const result = await handleTasks(client, userId);
     
-    if (ok) {
+    if (result === "NO_TASKS_AVAILABLE") {
+      console.log("[CLICKER] No tasks, delaying 30min");
+      await updateAccount(userId, {
+        next_clicker_time: new Date(Date.now() + NO_TASKS_DELAY * 60000).toISOString(),
+        last_error: "No tasks available",
+      });
+      return false;
+    }
+    
+    if (result === true) {
       console.log("[CLICKER] Tasks done, clicking again...");
       await withCaptcha(client, async () => {
         await sleep(delay());
@@ -448,29 +460,79 @@ async function doClicker(client, userId) {
       const menu2 = await ensureMenu(client);
       await withCaptcha(client, async () => {
         await sleep(delay());
-        await menu2.click({ text: "✨ Кликер" });
+        const clickerBtn2 = findButton(menu2, "Кликер");
+        if (clickerBtn2?.data) {
+          popup = await getCallbackAnswer(client, menu2, clickerBtn2.data);
+          console.log(`[CLICKER] Popup after tasks: ${popup || "none"}`);
+        } else {
+          await menu2.click({ text: "✨ Кликер" });
+        }
       });
     } else {
       console.log("[CLICKER] Tasks failed");
       return false;
     }
   }
-
+  
+  // Check for sponsor subscription requirement
+  if (popup?.includes("Подпишись на все каналы")) {
+    console.log("[CLICKER] ❌ Sponsor channels required - treating as sponsor subscription");
+    throw new Error("SPONSOR_SUBSCRIPTION_REQUIRED");
+  }
+  
+  // Solve captcha if present (this happens after click)
   await sleep(delay());
-  await solveCaptcha(client);
+  const captchaSolved = await solveCaptcha(client);
+  
+  // If captcha was solved (either now or during click), click succeeded - skip reward check
+  if (captchaSolved || captchaSolvedDuringClick) {
+    console.log("[CLICKER] ✅ Captcha solved - click succeeded");
+  } else {
+    // No captcha involved, check popup for reward
+    if (!popup?.includes("получил")) {
+      console.log("[CLICKER] ❌ Click failed - no reward received");
+      console.log(`[CLICKER] Popup was: ${popup}`);
+      await updateAccount(userId, {
+        next_clicker_time: new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
+        last_error: `Click failed: ${popup?.substring(0, 50)}`,
+      });
+      return false;
+    }
+    console.log("[CLICKER] ✅ Reward confirmed in popup");
+  }
 
-  const { data } = await supabase.from("accounts").select("total_clicks").eq("user_id", userId).single();
+  // Get current stats
+  const { data } = await supabase.from("accounts").select("total_clicks, cap").eq("user_id", userId).single();
   const totalClicks = (data?.total_clicks || 0) + 1;
+  const currentCap = (data?.cap || 0) + 1;
 
+  // Check cap limit
+  if (currentCap >= CAP_LIMIT) {
+    const capDelay = CAP_DELAY();
+    console.log(`[CLICKER] 🛑 Cap limit (${CAP_LIMIT}), reset & delay ${capDelay}min`);
+    await updateAccount(userId, {
+      next_clicker_time: new Date(Date.now() + capDelay * 60000).toISOString(),
+      last_click_at: new Date().toISOString(),
+      total_clicks: totalClicks,
+      cap: 0,
+      error_count: 0,
+      last_error: null,
+    });
+    console.log("[CLICKER] ✅ Success");
+    return true;
+  }
+
+  // Normal update
   await updateAccount(userId, {
     next_clicker_time: new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
     last_click_at: new Date().toISOString(),
     total_clicks: totalClicks,
+    cap: currentCap,
     error_count: 0,
     last_error: null,
   });
 
-  console.log("[CLICKER] ✅ Success");
+  console.log(`[CLICKER] ✅ Success (cap: ${currentCap}/${CAP_LIMIT})`);
   return true;
 }
 
@@ -479,24 +541,33 @@ async function doClicker(client, userId) {
 // ============================================
 async function doDaily(client, userId) {
   console.log("[DAILY] Starting...");
+  console.log(`[DEBUG-DAILY] Getting menu for user ${userId}`);
   
   const menu = await ensureMenu(client);
+  console.log(`[DEBUG-DAILY] Menu obtained, clicking Profile`);
+  
   await withCaptcha(client, async () => {
     await sleep(delay());
     await menu.click({ text: "👤 Профиль" });
     await sleep(delay());
   });
+  console.log(`[DEBUG-DAILY] Profile clicked, getting messages`);
 
   const msgs = await client.getMessages(BOT, { limit: 3 });
   const profile = msgs.find(m => m.replyMarkup && m.text?.includes("Профиль"));
   
-  if (!profile) throw new Error("Profile not found");
+  if (!profile) {
+    console.log(`[DEBUG-DAILY] Profile not found in messages`);
+    throw new Error("Profile not found");
+  }
 
+  console.log(`[DEBUG-DAILY] Profile found, clicking Daily reward`);
   await withCaptcha(client, async () => {
     await profile.click({ text: "🎁 Ежедневка" });
     await sleep(delay());
   });
 
+  console.log(`[DEBUG-DAILY] Daily clicked, updating database`);
   const { data } = await supabase.from("accounts").select("total_dailies").eq("user_id", userId).single();
   const totalDailies = (data?.total_dailies || 0) + 1;
 
@@ -509,6 +580,7 @@ async function doDaily(client, userId) {
   });
 
   console.log("[DAILY] ✅ Success");
+  console.log(`[DEBUG-DAILY] Completed for user ${userId}`);
   return true;
 }
 
@@ -523,6 +595,7 @@ async function processAccount(acc) {
     client = new TelegramClient(new StringSession(acc.session_string), API_ID, API_HASH, {
       connectionRetries: 5,
       receiveUpdates: false,
+      autoReconnect: false, // Don't auto-reconnect
     });
 
     await client.connect();
@@ -532,66 +605,48 @@ async function processAccount(acc) {
     const clickerDue = new Date(acc.next_clicker_time) <= now;
     const dailyDue = new Date(acc.next_daily_time) <= now;
 
-    if (clickerDue) {
-      await doClicker(client, acc.user_id);
-    }
-
-    if (dailyDue) {
-      await doDaily(client, acc.user_id);
-    }
-
-    if (!clickerDue && !dailyDue) {
-      console.log("⏭️ Nothing due");
-    }
+    if (clickerDue) await doClicker(client, acc.user_id);
+    if (dailyDue) await doDaily(client, acc.user_id);
+    if (!clickerDue && !dailyDue) console.log("⏭️ Nothing due");
+    
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
     
-    // Special handling for channel limit (500 channels)
+    const delayMinutes = (delay) => delay + (CLICKER_MIN + Math.random() * CLICKER_MAX);
+    
     if (error.message === "CHANNELS_TOO_MUCH") {
-      console.log("[CHANNEL_LIMIT] Notifying admin...");
-      try {
-        const limitNotification = `🚨 Channel Limit Reached (500)\n\nInstance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser ID: ${acc.user_id}\n\nAccount has reached the 500 channel limit and cannot join more channels.\n\nTime: ${new Date().toLocaleString()}`;
-        if (client) {
-          await client.sendMessage(ADMIN, { message: limitNotification });
-        }
-      } catch (notifyError) {
-        console.log(`Failed to notify admin: ${notifyError.message}`);
-      }
-      // Delay next clicker time by 10 hours
-      const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
+      await sendAdminNotification(client, "🚨 Channel Limit (500)", 
+        `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser: ${acc.user_id}`);
       await updateAccount(acc.user_id, {
-        next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
-        last_error: "Channel limit reached (500 channels)",
+        next_clicker_time: new Date(Date.now() + delayMinutes(CHANNEL_LIMIT_DELAY) * 60000).toISOString(),
+        last_error: "Channel limit (500)",
       });
     } else if (error.message === "SPONSOR_SUBSCRIPTION_REQUIRED") {
-      console.log("[SPONSOR] Notifying admin...");
-      try {
-        const sponsorNotification = `🚨 Sponsor Subscription Required\n\nInstance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser ID: ${acc.user_id}\n\nThe bot is asking to subscribe to sponsors (Подпишись на наших спонсоров).\n\nTime: ${new Date().toLocaleString()}`;
-        if (client) {
-          await client.sendMessage(ADMIN, { message: sponsorNotification });
-        }
-      } catch (notifyError) {
-        console.log(`Failed to notify admin: ${notifyError.message}`);
-      }
-      // Delay next clicker time by 10 hours + clicker randomization
-      const delayMinutes = 10 * 60 + (CLICKER_MIN + Math.random() * CLICKER_MAX);
+      await sendAdminNotification(client, "🚨 Sponsor Subscription Required",
+        `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser: ${acc.user_id}`);
       await updateAccount(acc.user_id, {
-        next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
+        next_clicker_time: new Date(Date.now() + delayMinutes(SPONSOR_DELAY) * 60000).toISOString(),
         last_error: "Sponsor subscription required",
       });
     } else {
       await incrementError(acc.user_id, error.message);
-      
-      // Send notification to admin
       if (client) {
-        await sendErrorNotification(client, acc.user_id, error.message, acc.phone);
+        await sendAdminNotification(client, "⚠️ Error Alert",
+          `Instance: ${INSTANCE_ID}\nUser: ${acc.user_id}\nPhone: ${acc.phone}\nError: ${error.message}`);
       }
     }
   } finally {
     if (client) {
-      await sleep(500);
-      await client.destroy();
-      console.log("🔌 Disconnected");
+      console.log(`[DEBUG-PROCESS] Cleanup started`);
+      try {
+        await sleep(500);
+        console.log(`[DEBUG-PROCESS] Calling destroy()`);
+        await client.destroy();
+        console.log("🔌 Disconnected");
+      } catch (e) {
+        console.log(`[DEBUG-PROCESS] Destroy error (suppressing): ${e.message}`);
+      }
+      console.log(`[DEBUG-PROCESS] Cleanup finished`);
     }
   }
 }

@@ -21,41 +21,30 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 async function getBalance(client) {
   console.log("[BALANCE] Getting balance...");
   
-  // Send /start to get main menu
   await client.sendMessage(BOT, { message: "/start" });
   await sleep(4000);
   
-  // Get messages and find main menu
   const msgs = await client.getMessages(BOT, { limit: 5 });
   const menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
   
-  if (!menu) {
-    throw new Error("Main menu not found");
-  }
+  if (!menu) throw new Error("Main menu not found");
   
-  // Click on Профиль
   await sleep(2000);
   await menu.click({ text: "👤 Профиль" });
   await sleep(3000);
   
-  // Get profile message
   const profileMsgs = await client.getMessages(BOT, { limit: 3 });
   const profile = profileMsgs.find(m => m.text?.includes("✨ Профиль"));
   
-  if (!profile) {
-    throw new Error("Profile not found");
-  }
+  if (!profile) throw new Error("Profile not found");
   
   console.log("[BALANCE] Profile found:");
   console.log(profile.text);
   
-  // Extract balance using regex
   const balanceMatch = profile.text.match(/💰 Баланс:\s*([\d.]+)\s*⭐️/);
-  if (!balanceMatch) {
-    throw new Error("Balance not found in profile");
-  }
+  if (!balanceMatch) throw new Error("Balance not found in profile");
   
-  const balance = balanceMatch[1];
+  const balance = parseFloat(balanceMatch[1]);
   console.log(`[BALANCE] Balance: ${balance} ⭐️`);
   
   return balance;
@@ -66,7 +55,6 @@ async function getBalance(client) {
 // ============================================
 async function sendBalanceToAdmin(client, phone, balance) {
   const message = `💰 Balance Report\n\nPhone: ${phone}\nBalance: ${balance} ⭐️\n\nTime: ${new Date().toLocaleString()}`;
-  
   await client.sendMessage(ADMIN, { message });
   console.log(`[BALANCE] Sent to @${ADMIN}`);
 }
@@ -92,17 +80,17 @@ async function processAccount(acc) {
     await sendBalanceToAdmin(client, acc.phone, balance);
 
     console.log("✅ Balance check complete");
+    return balance;
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
+    return null;
   } finally {
     if (client) {
       await sleep(500);
       try {
         await client.destroy();
         console.log("🔌 Disconnected");
-      } catch (e) {
-        // Suppress errors
-      }
+      } catch (e) {}
     }
   }
 }
@@ -116,7 +104,6 @@ async function main() {
   console.log(`📅 ${new Date().toLocaleString()}`);
   console.log("=".repeat(50));
 
-  // Get all active accounts for this instance
   const { data: accounts } = await supabase
     .from("accounts")
     .select("*")
@@ -130,9 +117,42 @@ async function main() {
 
   console.log(`📋 Found ${accounts.length} account(s)\n`);
 
+  let totalBalance = 0;
+  let successCount = 0;
+
   for (const acc of accounts) {
-    await processAccount(acc);
+    const balance = await processAccount(acc);
+    if (balance !== null) {
+      totalBalance += balance;
+      successCount++;
+    }
     await sleep(2000);
+  }
+
+  const summary = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 TOTAL BALANCE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Instance: ${INSTANCE_ID}
+Accounts checked: ${successCount}/${accounts.length}
+Total Balance: ${totalBalance.toFixed(2)} ⭐️
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+  console.log(`\n${summary}`);
+
+  // Also send summary to admin via first available client
+  if (successCount > 0) {
+    let adminClient;
+    try {
+      adminClient = new TelegramClient(new StringSession(accounts[0].session_string), API_ID, API_HASH, {
+        connectionRetries: 3,
+        receiveUpdates: false,
+      });
+      await adminClient.connect();
+      await adminClient.sendMessage(ADMIN, { message: `📊 Balance Summary\n\nInstance: ${INSTANCE_ID}\nAccounts: ${successCount}/${accounts.length}\nTotal: ${totalBalance.toFixed(2)} ⭐️\n\nTime: ${new Date().toLocaleString()}` });
+      await adminClient.destroy();
+    } catch (e) {
+      console.log(`Failed to send summary to admin: ${e.message}`);
+    }
   }
 
   console.log("\n✅ All accounts processed\n");
