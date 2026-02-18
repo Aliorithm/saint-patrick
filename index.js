@@ -21,9 +21,9 @@ const delay = () => 4000 + Math.random() * 2000;
 // TIME DELAYS (in minutes)
 const CLICKER_MIN = 8;
 const CLICKER_MAX = 10;
-const DAILY = 24 * 60;
 const CAP_LIMIT = 25;
 const CAP_DELAY = () => 120 + Math.floor(Math.random() * 181); // 2h to 5h random
+const DAILY = (24 * 60) + Math.floor(Math.random() * 120); // 24h to 26h random
 const DAILY_LIMIT_DELAY = 10 * 60;
 const SPONSOR_DELAY = 10 * 60;
 const CHANNEL_LIMIT_DELAY = 10 * 60;
@@ -673,12 +673,17 @@ async function runTrigger() {
 // ============================================
 // SERVER
 // ============================================
+const { main: runBalance } = require("./balance");
 const app = express();
 
 app.get("/", (req, res) => res.send(`Instance ${INSTANCE_ID} ✅`));
 app.get("/trigger", (req, res) => {
   res.send("Triggered");
   runTrigger().catch(console.error);
+});
+app.get("/balance", (req, res) => {
+  res.send("Balance check triggered");
+  runBalance().catch(console.error);
 });
 
 app.listen(PORT, () => {
