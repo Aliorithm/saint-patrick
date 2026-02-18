@@ -427,11 +427,12 @@ async function doClicker(client, userId) {
 
   // Check for daily limit
   if (popup?.includes("завтра") || popup?.includes("слишком много")) {
-    console.log("[CLICKER] ⚠️ Daily limit reached!");
+    console.log("[CLICKER] ⚠️ Daily limit reached! Resetting cap to 0.");
     const delayMinutes = DAILY_LIMIT_DELAY + (CLICKER_MIN + Math.random() * CLICKER_MAX);
     await updateAccount(userId, {
       next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
       last_error: "Daily limit",
+      cap: 0,
     });
     return false;
   }
@@ -673,17 +674,12 @@ async function runTrigger() {
 // ============================================
 // SERVER
 // ============================================
-const { main: runBalance } = require("./balance");
 const app = express();
 
 app.get("/", (req, res) => res.send(`Instance ${INSTANCE_ID} ✅`));
 app.get("/trigger", (req, res) => {
   res.send("Triggered");
   runTrigger().catch(console.error);
-});
-app.get("/balance", (req, res) => {
-  res.send("Balance check triggered");
-  runBalance().catch(console.error);
 });
 
 app.listen(PORT, () => {

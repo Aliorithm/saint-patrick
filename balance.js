@@ -159,15 +159,11 @@ Total Balance: ${totalBalance.toFixed(2)} ⭐️
 }
 
 // ============================================
-// RUN (only when executed directly)
+// RUN
 // ============================================
-if (require.main === module) {
-  main()
-    .then(() => process.exit(0))
-    .catch((err) => {
-      console.error("Fatal error:", err);
-      process.exit(1);
-    });
-}
-
-module.exports = { main };
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
