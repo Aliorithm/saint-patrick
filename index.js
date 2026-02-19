@@ -684,7 +684,7 @@ async function doClicker(client, userId) {
 
   // Check for daily limit
   if (popup?.includes("завтра") || popup?.includes("слишком много")) {
-    console.log("[CLICKER] ⚠️ Daily limit reached — queuing tasks");
+    console.log("[CLICKER] ⚠️ Daily limit reached — queuing standalone tasks");
     const delayMinutes = DAILY_LIMIT_DELAY + (CLICKER_MIN + Math.random() * CLICKER_MAX);
     await updateAccount(userId, {
       next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
@@ -699,6 +699,8 @@ async function doClicker(client, userId) {
   if (popup?.includes("выполни хотя бы")) {
     console.log("[CLICKER] Task required!");
     const result = await handleTasks(client, userId);
+    // Clear task_pending since we just handled tasks — prevent standalone double-run
+    await updateAccount(userId, { task_pending: false });
     
     if (result === "NO_TASKS_AVAILABLE") {
       console.log("[CLICKER] No tasks, delaying 30min");
@@ -886,14 +888,25 @@ async function doDaily(client, userId) {
 // ============================================
 async function doStandaloneTasks(client, userId) {
   console.log("[TASK-STANDALONE] Starting...");
+  let totalCompleted = 0;
+
   try {
-    const result = await handleTasks(client, userId);
-    if (result === true) {
-      console.log("[TASK-STANDALONE] ✅ Tasks completed");
-    } else if (result === "NO_TASKS_AVAILABLE") {
-      console.log("[TASK-STANDALONE] ⏰ No tasks available");
-    } else {
-      console.log("[TASK-STANDALONE] ❌ Tasks failed or incomplete");
+    // Loop until no tasks left — handleTasks returns true (1 completed), false (failed), or NO_TASKS_AVAILABLE
+    while (true) {
+      const result = await handleTasks(client, userId);
+
+      if (result === "NO_TASKS_AVAILABLE") {
+        console.log(`[TASK-STANDALONE] ✅ All tasks done (completed ${totalCompleted} total)`);
+        break;
+      } else if (result === true) {
+        totalCompleted++;
+        console.log(`[TASK-STANDALONE] Task ${totalCompleted} completed — checking for more...`);
+        await sleep(2000);
+      } else {
+        // false = task failed or no verify button — stop to avoid hammering
+        console.log(`[TASK-STANDALONE] ⚠️ Task returned false — stopping (completed ${totalCompleted})`);
+        break;
+      }
     }
   } catch (e) {
     // Propagate CHANNELS_TOO_MUCH so processAccount error handler deals with it
@@ -924,20 +937,20 @@ async function processAccount(acc) {
     console.log("✅ Connected");
 
     const now = new Date();
-    const clickerDue = new Date(acc.next_clicker_time) <= now;
-    const dailyDue   = new Date(acc.next_daily_time) <= now;
+    const clickerDue    = new Date(acc.next_clicker_time) <= now;
+    const dailyDue      = new Date(acc.next_daily_time) <= now;
     // next_leave_time null = account never participates in leaving
-    const leaveDue   = acc.next_leave_time && new Date(acc.next_leave_time) <= now;
-    // task_pending: run tasks unless leave is happening within the next hour
+    const leaveDue      = acc.next_leave_time && new Date(acc.next_leave_time) <= now;
+    // task_pending: skip if leave is happening within the next hour (channels about to be cleaned)
     const leaveWithinHour = acc.next_leave_time &&
       (new Date(acc.next_leave_time) - now) < 60 * 60 * 1000;
-    const taskDue = acc.task_pending === true;
+    const taskDue       = acc.task_pending === true;
 
     if (clickerDue) await doClicker(client, acc.user_id);
     if (dailyDue)   await doDaily(client, acc.user_id);
     if (taskDue) {
       if (leaveWithinHour) {
-        console.log("[TASK] ⏭️ Skipping — leave imminent within 1h, clearing task_pending");
+        console.log("[TASK-STANDALONE] ⏭️ Skipping — leave imminent within 1h");
         await updateAccount(acc.user_id, { task_pending: false });
       } else {
         await doStandaloneTasks(client, acc.user_id);
