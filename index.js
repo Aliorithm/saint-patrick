@@ -28,9 +28,8 @@ const DAILY_LIMIT_DELAY = 10 * 60;
 const SPONSOR_DELAY = 10 * 60;
 const CHANNEL_LIMIT_DELAY = 10 * 60;
 const NO_TASKS_DELAY = 30;
-const LEAVE_DELAY_MIN = 24 * 60;           // 24h in minutes
-const LEAVE_DELAY_MAX = 48 * 60;           // 48h in minutes
-const LEAVE_BETWEEN_MS = 800 + Math.random() * 700; // ~0.8–1.5s between each leave
+const LEAVE_DELAY_MIN = 24 * 60;  // 24h in minutes
+const LEAVE_DELAY_MAX = 48 * 60;  // 48h in minutes
 
 // ============================================
 // SUPABASE
@@ -124,7 +123,7 @@ function findButton(msg, textPart) {
 async function ensureMenu(client) {
   let msgs = await client.getMessages(BOT, { limit: 5 });
   let menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
-  
+
   if (!menu) {
     await withCaptcha(client, async () => {
       await client.sendMessage(BOT, { message: "/start" });
@@ -133,18 +132,31 @@ async function ensureMenu(client) {
     msgs = await client.getMessages(BOT, { limit: 5 });
     menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
   }
-  
-  // Check for sponsor subscription (must have specific trigger AND no referral link context)
-  const sponsorMsg = msgs.find(m => 
+
+  // Check for sponsor subscription screen
+  const sponsorMsg = msgs.find(m =>
     m.text?.includes("Чтобы активировать бота:") &&
     m.text?.includes("Подпишись на наших спонсоров")
   );
-  
+
   if (sponsorMsg) {
-    console.log("[SPONSOR] Subscription required detected!");
-    throw new Error("SPONSOR_SUBSCRIPTION_REQUIRED");
+    console.log("[SPONSOR] Screen detected — resolving...");
+    const resolved = await handleSponsor(client, sponsorMsg);
+    if (!resolved) throw new Error("SPONSOR_UNRESOLVABLE");
+    // Re-fetch menu after sponsors cleared
+    await sleep(5000);
+    msgs = await client.getMessages(BOT, { limit: 5 });
+    menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
+    if (!menu) {
+      await withCaptcha(client, async () => {
+        await client.sendMessage(BOT, { message: "/start" });
+        await sleep(4000);
+      });
+      msgs = await client.getMessages(BOT, { limit: 5 });
+      menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
+    }
   }
-  
+
   return menu;
 }
 
@@ -218,6 +230,181 @@ async function withCaptcha(client, action) {
   await action();
   await sleep(1500);
   await solveCaptcha(client);
+}
+
+// ============================================
+// SPONSOR HANDLER
+// ============================================
+async function handleSponsor(client, sponsorMsg) {
+  console.log("[SPONSOR] Processing sponsor requirements...");
+  const MAX_RETRIES = 3;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    console.log(`[SPONSOR] Attempt ${attempt}/${MAX_RETRIES}`);
+
+    // Always re-fetch fresh — buttons may change between attempts
+    const msgs = await client.getMessages(BOT, { limit: 5 });
+    const freshMsg = msgs.find(m =>
+      m.text?.includes("Чтобы активировать бота:") && m.replyMarkup
+    ) || sponsorMsg;
+
+    if (!freshMsg?.replyMarkup?.rows) {
+      console.log("[SPONSOR] No buttons found");
+      return false;
+    }
+
+    // Separate action buttons from verify button
+    const actionButtons = [];
+    let verifyBtn = null;
+
+    for (const row of freshMsg.replyMarkup.rows) {
+      for (const btn of row.buttons) {
+        const text = btn.text || "";
+        if (text.includes("Я выполнил") || text.includes("Проверить")) {
+          verifyBtn = btn;
+        } else if (btn.url) {
+          actionButtons.push(btn);
+        }
+      }
+    }
+
+    console.log(`[SPONSOR] ${actionButtons.length} action button(s), verify: ${!!verifyBtn}`);
+
+    // Process each button one by one with human-like delays
+    for (const btn of actionButtons) {
+      const url  = btn.url  || "";
+      const text = btn.text || "";
+      console.log(`[SPONSOR] Processing: "${text}" -> ${url}`);
+
+      await sleep(2000 + Math.random() * 2000);
+
+      try {
+        // t.me/botname?start=PARAM → bot start
+        // t.me/channel or t.me/+hash → channel/group join
+        const botMatch     = url.match(/t\.me\/([^?/]+)\?start=(.+)/);
+        const channelMatch = !botMatch && url.match(/t\.me\/(.+)/);
+
+        if (botMatch) {
+          const botName    = botMatch[1];
+          const startParam = botMatch[2];
+          console.log(`[SPONSOR] Starting bot @${botName}`);
+          await withCaptcha(client, async () => {
+            await client.sendMessage(botName, { message: `/start ${startParam}` });
+          });
+          await sleep(3000 + Math.random() * 2000);
+          console.log("[SPONSOR] Bot started ✅");
+
+        } else if (channelMatch) {
+          const identifier = channelMatch[1].split("?")[0];
+          console.log(`[SPONSOR] Joining: ${identifier}`);
+          await withCaptcha(client, async () => {
+            try {
+              if (identifier.startsWith("+")) {
+                await client.invoke(new Api.messages.ImportChatInvite({ hash: identifier.substring(1) }));
+              } else {
+                await client.invoke(new Api.channels.JoinChannel({ channel: identifier }));
+              }
+              console.log("[SPONSOR] Joined ✅");
+            } catch (e) {
+              const eu = (e.message || "").toUpperCase();
+              if (eu.includes("CHANNELS_TOO_MUCH") || eu.includes("TOO MANY CHANNELS")) {
+                console.log("[SPONSOR] CHANNELS_TOO_MUCH — skipping this button");
+              } else if (e.message?.includes("USER_ALREADY_PARTICIPANT") || e.message?.includes("INVITE_REQUEST_SENT")) {
+                console.log("[SPONSOR] Already a member — OK");
+              } else {
+                console.log(`[SPONSOR] Join failed (skipping): ${e.message}`);
+              }
+            }
+          });
+
+        } else {
+          console.log(`[SPONSOR] Unrecognised URL — skipping: ${url}`);
+        }
+
+      } catch (e) {
+        console.log(`[SPONSOR] Button error (skipping): ${e.message}`);
+      }
+
+      await sleep(1500 + Math.random() * 1500);
+    }
+
+    // Click verify
+    if (!verifyBtn) {
+      console.log("[SPONSOR] No verify button found — cannot complete");
+      return false;
+    }
+
+    console.log("[SPONSOR] Clicking verify...");
+    await sleep(2000 + Math.random() * 1000);
+
+    let verifyPopup = null;
+    try {
+      verifyPopup = await getCallbackAnswer(client, freshMsg, verifyBtn.data);
+    } catch (e) {
+      console.log(`[SPONSOR] Verify click error: ${e.message}`);
+    }
+
+    console.log(`[SPONSOR] Verify response: ${verifyPopup || "none"}`);
+
+    // "Подпишись на все каналы" = not all done — retry
+    if (verifyPopup?.includes("Подпишись на все каналы")) {
+      console.log(`[SPONSOR] Not all completed — retrying (attempt ${attempt})`);
+      await sleep(3000);
+      continue;
+    }
+
+    // Success
+    console.log("[SPONSOR] ✅ Verified — waiting for main menu...");
+    await sleep(5000 + Math.random() * 3000);
+    return true;
+  }
+
+  console.log(`[SPONSOR] ❌ Failed after ${MAX_RETRIES} attempts`);
+  return false;
+}
+
+// ============================================
+// LEAVE CHANNELS
+// ============================================
+async function leaveChannels(client, userId) {
+  console.log("[LEAVE] Starting broadcast channel cleanup...");
+
+  let dialogs;
+  try {
+    dialogs = await client.getDialogs({ limit: 500 });
+  } catch (e) {
+    console.log(`[LEAVE] Failed to get dialogs: ${e.message}`);
+    return 0;
+  }
+
+  // Only broadcast channels (not supergroups, not regular groups)
+  const channels = dialogs.filter(d => {
+    const e = d.entity;
+    return e?.className === "Channel" && e?.broadcast === true && e?.megagroup !== true;
+  });
+
+  console.log(`[LEAVE] Found ${channels.length} broadcast channel(s)`);
+
+  let leftCount = 0;
+  for (const dialog of channels) {
+    try {
+      await client.invoke(new Api.channels.LeaveChannel({ channel: dialog.entity }));
+      leftCount++;
+      console.log(`[LEAVE] Left: ${dialog.entity.title} (${leftCount}/${channels.length})`);
+    } catch (e) {
+      console.log(`[LEAVE] Failed to leave ${dialog.entity.title}: ${e.message}`);
+    }
+    await sleep(800 + Math.random() * 700);
+  }
+
+  console.log(`[LEAVE] ✅ Done — left ${leftCount}/${channels.length} channels`);
+
+  const nextLeaveMin = LEAVE_DELAY_MIN + Math.floor(Math.random() * (LEAVE_DELAY_MAX - LEAVE_DELAY_MIN));
+  await updateAccount(userId, {
+    next_leave_time: new Date(Date.now() + nextLeaveMin * 60000).toISOString(),
+  });
+  console.log(`[LEAVE] Next leave in ${Math.round(nextLeaveMin / 60)}h`);
+  return leftCount;
 }
 
 // ============================================
@@ -430,11 +617,12 @@ async function doClicker(client, userId) {
 
   // Check for daily limit
   if (popup?.includes("завтра") || popup?.includes("слишком много")) {
-    console.log("[CLICKER] ⚠️ Daily limit reached!");
+    console.log("[CLICKER] ⚠️ Daily limit reached — resetting cap to 0");
     const delayMinutes = DAILY_LIMIT_DELAY + (CLICKER_MIN + Math.random() * CLICKER_MAX);
     await updateAccount(userId, {
       next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
       last_error: "Daily limit",
+      cap: 0,
     });
     return false;
   }
@@ -477,10 +665,23 @@ async function doClicker(client, userId) {
     }
   }
   
-  // Check for sponsor subscription requirement
+  // Check for sponsor subscription requirement — resolve inline
   if (popup?.includes("Подпишись на все каналы")) {
-    console.log("[CLICKER] ❌ Sponsor channels required - treating as sponsor subscription");
-    throw new Error("SPONSOR_SUBSCRIPTION_REQUIRED");
+    console.log("[CLICKER] Sponsor screen detected mid-click — resolving...");
+    const sponsorMsgs = await client.getMessages(BOT, { limit: 5 });
+    const sponsorMsg = sponsorMsgs.find(m =>
+      m.text?.includes("Чтобы активировать бота:") && m.replyMarkup
+    );
+    if (sponsorMsg) {
+      const resolved = await handleSponsor(client, sponsorMsg);
+      if (!resolved) throw new Error("SPONSOR_UNRESOLVABLE");
+      await updateAccount(userId, {
+        next_clicker_time: new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
+        last_error: "Sponsor cleared — retrying next cycle",
+      });
+      return false;
+    }
+    throw new Error("SPONSOR_UNRESOLVABLE");
   }
   
   // Solve captcha if present (this happens after click)
@@ -537,56 +738,6 @@ async function doClicker(client, userId) {
 
   console.log(`[CLICKER] ✅ Success (cap: ${currentCap}/${CAP_LIMIT})`);
   return true;
-}
-
-// ============================================
-// LEAVE CHANNELS
-// ============================================
-async function leaveChannels(client, userId, phone) {
-  console.log("[LEAVE] Starting channel cleanup...");
-
-  let dialogs;
-  try {
-    dialogs = await client.getDialogs({ limit: 500 });
-  } catch (e) {
-    console.log(`[LEAVE] Failed to get dialogs: ${e.message}`);
-    return 0;
-  }
-
-  // Only broadcast channels (not supergroups, not regular groups)
-  const channels = dialogs.filter(d => {
-    const entity = d.entity;
-    return (
-      entity?.className === "Channel" &&
-      entity?.broadcast === true &&
-      entity?.megagroup !== true
-    );
-  });
-
-  console.log(`[LEAVE] Found ${channels.length} broadcast channel(s) to leave`);
-
-  let leftCount = 0;
-  for (const dialog of channels) {
-    try {
-      await client.invoke(new Api.channels.LeaveChannel({ channel: dialog.entity }));
-      leftCount++;
-      console.log(`[LEAVE] Left: ${dialog.entity.title} (${leftCount}/${channels.length})`);
-    } catch (e) {
-      console.log(`[LEAVE] Failed to leave ${dialog.entity.title}: ${e.message}`);
-    }
-    await sleep(800 + Math.random() * 700); // 0.8–1.5s delay between each
-  }
-
-  console.log(`[LEAVE] ✅ Done — left ${leftCount}/${channels.length} channels`);
-
-  // Schedule next leave: 24–48h from now
-  const nextLeaveMinutes = LEAVE_DELAY_MIN + Math.floor(Math.random() * (LEAVE_DELAY_MAX - LEAVE_DELAY_MIN));
-  await updateAccount(userId, {
-    next_leave_time: new Date(Date.now() + nextLeaveMinutes * 60000).toISOString(),
-  });
-
-  console.log(`[LEAVE] Next leave in ${Math.round(nextLeaveMinutes / 60)}h`);
-  return leftCount;
 }
 
 // ============================================
@@ -656,13 +807,13 @@ async function processAccount(acc) {
 
     const now = new Date();
     const clickerDue = new Date(acc.next_clicker_time) <= now;
-    const dailyDue = new Date(acc.next_daily_time) <= now;
-    // next_leave_time being null means this account never participates in leaving
-    const leaveDue = acc.next_leave_time && new Date(acc.next_leave_time) <= now;
+    const dailyDue   = new Date(acc.next_daily_time) <= now;
+    // next_leave_time null = account never participates in leaving
+    const leaveDue   = acc.next_leave_time && new Date(acc.next_leave_time) <= now;
 
     if (clickerDue) await doClicker(client, acc.user_id);
-    if (dailyDue) await doDaily(client, acc.user_id);
-    if (leaveDue) await leaveChannels(client, acc.user_id, acc.phone);
+    if (dailyDue)   await doDaily(client, acc.user_id);
+    if (leaveDue)   await leaveChannels(client, acc.user_id);
     if (!clickerDue && !dailyDue && !leaveDue) console.log("⏭️ Nothing due");
     
   } catch (error) {
@@ -671,20 +822,20 @@ async function processAccount(acc) {
     const delayMinutes = (delay) => delay + (CLICKER_MIN + Math.random() * CLICKER_MAX);
     
     if (error.message === "CHANNELS_TOO_MUCH") {
-      await sendAdminNotification(client, "🚨 Channel Limit (500)", 
-        `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser: ${acc.user_id}`);
+      await sendAdminNotification(client, "🚨 Channel Limit (500)",
+        `Instance: ${INSTANCE_ID}
+Phone: ${acc.phone}
+User: ${acc.user_id}`);
       await updateAccount(acc.user_id, {
         next_clicker_time: new Date(Date.now() + delayMinutes(CHANNEL_LIMIT_DELAY) * 60000).toISOString(),
-        // Trigger leave on next cycle immediately
-        next_leave_time: new Date().toISOString(),
+        next_leave_time: new Date().toISOString(), // trigger leave on next cycle
         last_error: "Channel limit (500)",
       });
-    } else if (error.message === "SPONSOR_SUBSCRIPTION_REQUIRED") {
-      await sendAdminNotification(client, "🚨 Sponsor Subscription Required",
-        `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser: ${acc.user_id}`);
+    } else if (error.message === "SPONSOR_UNRESOLVABLE") {
+      console.log("[SPONSOR] Unresolvable after 3 attempts — delaying account");
       await updateAccount(acc.user_id, {
         next_clicker_time: new Date(Date.now() + delayMinutes(SPONSOR_DELAY) * 60000).toISOString(),
-        last_error: "Sponsor subscription required",
+        last_error: "Sponsor screen unresolvable after 3 attempts",
       });
     } else {
       await incrementError(acc.user_id, error.message);
