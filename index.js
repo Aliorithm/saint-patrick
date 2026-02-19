@@ -55,7 +55,7 @@ async function getAccountsDue() {
       .select("*")
       .eq("instance_id", INSTANCE_ID)
       .eq("is_active", true)
-      .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now},task_pending.eq.true`);
+      .or(`next_clicker_time.lte.${now},next_daily_time.lte.${now}`);
     return fallbackData || [];
   }
   
@@ -330,7 +330,7 @@ async function handleSponsor(client, sponsorMsg) {
         } else if (url.includes("startapp")) {
           // Webapp sponsor button
           if (url.includes("patrickgamesbot")) {
-            // Patrick games webapp — join the news channel
+            // Patrick games webapp — join the news channel first
             console.log("[SPONSOR] Patrick webapp — joining patrickgames_news");
             await withCaptcha(client, async () => {
               try {
@@ -352,10 +352,23 @@ async function handleSponsor(client, sponsorMsg) {
               }
             });
           } else {
-            // Other webapp — simulate open+close
-            console.log("[SPONSOR] Webapp — simulating open+close");
-            await sleep(4000 + Math.random() * 3000);
-            console.log("[SPONSOR] Webapp wait done");
+            // Other webapp — extract bot name and /start it
+            const webappBotMatch = url.match(/t\.me\/([^/?]+)/);
+            const webappBot = webappBotMatch ? webappBotMatch[1] : null;
+            if (webappBot) {
+              console.log(`[SPONSOR] Webapp — starting bot @${webappBot}`);
+              try {
+                await withCaptcha(client, async () => {
+                  await client.sendMessage(webappBot, { message: "/start" });
+                });
+                await sleep(3000 + Math.random() * 2000);
+                console.log(`[SPONSOR] Bot @${webappBot} started ✅`);
+              } catch (e) {
+                console.log(`[SPONSOR] Failed to start @${webappBot}: ${e.message}`);
+              }
+            } else {
+              console.log(`[SPONSOR] Could not extract bot from webapp URL: ${url}`);
+            }
           }
         } else {
           console.log(`[SPONSOR] Unrecognised URL — skipping: ${url}`);
@@ -386,9 +399,32 @@ async function handleSponsor(client, sponsorMsg) {
 
     console.log(`[SPONSOR] Verify response: ${verifyPopup || "none"}`);
 
-    // "Подпишись на все каналы" = not all done — retry
+    // "Подпишись на все каналы" = not all done
     if (verifyPopup?.includes("Подпишись на все каналы")) {
-      console.log(`[SPONSOR] Not all completed — retrying (attempt ${attempt})`);
+      console.log(`[SPONSOR] Not all completed (attempt ${attempt}) — trying RequestAppWebView for webapp buttons`);
+      // On verify failure, invoke RequestAppWebView for each webapp button as fallback
+      for (const btn of actionButtons) {
+        const burl = btn.url || "";
+        if (!burl.includes("startapp") || burl.includes("patrickgamesbot")) continue;
+        const webappBotMatch = burl.match(/t\.me\/([^/?]+)/);
+        const webappBot = webappBotMatch ? webappBotMatch[1] : null;
+        if (!webappBot) continue;
+        try {
+          console.log(`[SPONSOR] RequestAppWebView for @${webappBot}...`);
+          const peer = await client.getEntity(webappBot);
+          await client.invoke(new Api.messages.RequestAppWebView({
+            peer: peer,
+            app: new Api.InputBotAppShortName({ botId: peer, shortName: "app" }),
+            platform: "android",
+            startParam: "",
+            writeAllowed: true,
+          }));
+          console.log(`[SPONSOR] RequestAppWebView done for @${webappBot}`);
+        } catch (e) {
+          console.log(`[SPONSOR] RequestAppWebView failed for @${webappBot}: ${e.message}`);
+        }
+        await sleep(2000);
+      }
       await sleep(3000);
       continue;
     }
@@ -571,10 +607,24 @@ async function handleTasks(client, userId) {
           }
         });
       } else {
-        // Other webapp — simulate open+close, bot approves after a delay
-        console.log("[TASK] Webapp — simulating open+close");
-        await sleep(4000 + Math.random() * 3000);
-        console.log("[TASK] Webapp wait done");
+        // Other webapp — extract bot name and /start it first
+        const webappBotMatch = url.match(/t\.me\/([^/?]+)/);
+        const webappBot = webappBotMatch ? webappBotMatch[1] : null;
+        if (webappBot) {
+          console.log(`[TASK] Webapp — starting bot @${webappBot} first`);
+          try {
+            await withCaptcha(client, async () => {
+              await client.sendMessage(webappBot, { message: "/start" });
+            });
+            await sleep(3000 + Math.random() * 2000);
+            console.log(`[TASK] Bot @${webappBot} started ✅`);
+            entity = { type: "webapp", bot: webappBot, url };
+          } catch (e) {
+            console.log(`[TASK] Failed to start @${webappBot}: ${e.message}`);
+          }
+        } else {
+          console.log(`[TASK] Could not extract bot from webapp URL: ${url}`);
+        }
       }
     }
 
@@ -617,6 +667,31 @@ async function handleTasks(client, userId) {
       }
 
       if (popup?.includes("не найдена")) {
+        // If this was a webapp task, try RequestAppWebView as fallback before giving up
+        if (entity?.type === "webapp" && entity.bot) {
+          console.log(`[TASK] Webapp verify failed — trying RequestAppWebView for @${entity.bot}`);
+          try {
+            const peer = await client.getEntity(entity.bot);
+            await client.invoke(new Api.messages.RequestAppWebView({
+              peer: peer,
+              app: new Api.InputBotAppShortName({ botId: peer, shortName: "app" }),
+              platform: "android",
+              startParam: "",
+              writeAllowed: true,
+            }));
+            console.log(`[TASK] RequestAppWebView done — re-verifying...`);
+            await sleep(3000 + Math.random() * 2000);
+            const popup2 = await getCallbackAnswer(client, taskMsg, buttons.verify.data);
+            console.log(`[TASK] Re-verify popup: ${popup2 || "none"}`);
+            if (popup2?.includes("выполнено") || popup2?.includes("получена")) {
+              console.log("[TASK] ✅ Success after RequestAppWebView!");
+              completed++;
+              break;
+            }
+          } catch (e) {
+            console.log(`[TASK] RequestAppWebView failed: ${e.message}`);
+          }
+        }
         console.log("[TASK] ❌ Failed");
         if (buttons.skip) {
           await withCaptcha(client, async () => {
@@ -628,9 +703,9 @@ async function handleTasks(client, userId) {
         continue;
       }
       
-      // If we joined but unclear result, assume success
+      // If we joined/started but unclear result, assume success
       if (entity) {
-        console.log("[TASK] ✅ Joined - assuming success");
+        console.log("[TASK] ✅ Joined/started - assuming success");
         completed++;
         break;
       }
@@ -684,13 +759,12 @@ async function doClicker(client, userId) {
 
   // Check for daily limit
   if (popup?.includes("завтра") || popup?.includes("слишком много")) {
-    console.log("[CLICKER] ⚠️ Daily limit reached — queuing standalone tasks");
+    console.log("[CLICKER] ⚠️ Daily limit reached — resetting cap to 0");
     const delayMinutes = DAILY_LIMIT_DELAY + (CLICKER_MIN + Math.random() * CLICKER_MAX);
     await updateAccount(userId, {
       next_clicker_time: new Date(Date.now() + delayMinutes * 60000).toISOString(),
       last_error: "Daily limit",
       cap: 0,
-      task_pending: true,
     });
     return false;
   }
@@ -699,8 +773,6 @@ async function doClicker(client, userId) {
   if (popup?.includes("выполни хотя бы")) {
     console.log("[CLICKER] Task required!");
     const result = await handleTasks(client, userId);
-    // Clear task_pending since we just handled tasks — prevent standalone double-run
-    await updateAccount(userId, { task_pending: false });
     
     if (result === "NO_TASKS_AVAILABLE") {
       console.log("[CLICKER] No tasks, delaying 30min");
@@ -884,42 +956,6 @@ async function doDaily(client, userId) {
 }
 
 // ============================================
-// STANDALONE TASKS
-// ============================================
-async function doStandaloneTasks(client, userId) {
-  console.log("[TASK-STANDALONE] Starting...");
-  let totalCompleted = 0;
-
-  try {
-    // Loop until no tasks left — handleTasks returns true (1 completed), false (failed), or NO_TASKS_AVAILABLE
-    while (true) {
-      const result = await handleTasks(client, userId);
-
-      if (result === "NO_TASKS_AVAILABLE") {
-        console.log(`[TASK-STANDALONE] ✅ All tasks done (completed ${totalCompleted} total)`);
-        break;
-      } else if (result === true) {
-        totalCompleted++;
-        console.log(`[TASK-STANDALONE] Task ${totalCompleted} completed — checking for more...`);
-        await sleep(2000);
-      } else {
-        // false = task failed or no verify button — stop to avoid hammering
-        console.log(`[TASK-STANDALONE] ⚠️ Task returned false — stopping (completed ${totalCompleted})`);
-        break;
-      }
-    }
-  } catch (e) {
-    // Propagate CHANNELS_TOO_MUCH so processAccount error handler deals with it
-    if (e.message === "CHANNELS_TOO_MUCH") throw e;
-    console.log(`[TASK-STANDALONE] Error: ${e.message}`);
-  } finally {
-    // Always clear task_pending regardless of outcome
-    await updateAccount(userId, { task_pending: false });
-    console.log("[TASK-STANDALONE] task_pending cleared");
-  }
-}
-
-// ============================================
 // PROCESS
 // ============================================
 async function processAccount(acc) {
@@ -937,27 +973,15 @@ async function processAccount(acc) {
     console.log("✅ Connected");
 
     const now = new Date();
-    const clickerDue    = new Date(acc.next_clicker_time) <= now;
-    const dailyDue      = new Date(acc.next_daily_time) <= now;
+    const clickerDue = new Date(acc.next_clicker_time) <= now;
+    const dailyDue   = new Date(acc.next_daily_time) <= now;
     // next_leave_time null = account never participates in leaving
-    const leaveDue      = acc.next_leave_time && new Date(acc.next_leave_time) <= now;
-    // task_pending: skip if leave is happening within the next hour (channels about to be cleaned)
-    const leaveWithinHour = acc.next_leave_time &&
-      (new Date(acc.next_leave_time) - now) < 60 * 60 * 1000;
-    const taskDue       = acc.task_pending === true;
+    const leaveDue   = acc.next_leave_time && new Date(acc.next_leave_time) <= now;
 
     if (clickerDue) await doClicker(client, acc.user_id);
     if (dailyDue)   await doDaily(client, acc.user_id);
-    if (taskDue) {
-      if (leaveWithinHour) {
-        console.log("[TASK-STANDALONE] ⏭️ Skipping — leave imminent within 1h");
-        await updateAccount(acc.user_id, { task_pending: false });
-      } else {
-        await doStandaloneTasks(client, acc.user_id);
-      }
-    }
     if (leaveDue)   await leaveChannels(client, acc.user_id);
-    if (!clickerDue && !dailyDue && !taskDue && !leaveDue) console.log("⏭️ Nothing due");
+    if (!clickerDue && !dailyDue && !leaveDue) console.log("⏭️ Nothing due");
     
   } catch (error) {
     console.error(`❌ Error: ${error.message}`);
