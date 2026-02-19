@@ -133,14 +133,18 @@ async function ensureMenu(client) {
     menu = msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
   }
 
-  // Check for sponsor subscription screen
+  // Check for any blocking sponsor-like screen:
+  //   1. Bot activation screen ("Чтобы активировать бота:")
+  //   2. Mid-farm task screen ("Для продолжения фарма звёзд") — may have 1+ buttons
   const sponsorMsg = msgs.find(m =>
-    m.text?.includes("Чтобы активировать бота:") &&
-    m.text?.includes("Подпишись на наших спонсоров")
+    (m.text?.includes("Чтобы активировать бота:") ||
+     m.text?.includes("Для продолжения фарма звёзд")) &&
+    m.replyMarkup
   );
 
   if (sponsorMsg) {
-    console.log("[SPONSOR] Screen detected — resolving...");
+    const preview = sponsorMsg.text.substring(0, 50).trim().replace(/\n/g, " ");
+    console.log(`[SPONSOR] Blocking screen: "${preview}..." — resolving...`);
     const resolved = await handleSponsor(client, sponsorMsg);
     if (!resolved) throw new Error("SPONSOR_UNRESOLVABLE");
     // Re-fetch menu after sponsors cleared
@@ -245,7 +249,9 @@ async function handleSponsor(client, sponsorMsg) {
     // Always re-fetch fresh — buttons may change between attempts
     const msgs = await client.getMessages(BOT, { limit: 5 });
     const freshMsg = msgs.find(m =>
-      m.text?.includes("Чтобы активировать бота:") && m.replyMarkup
+      (m.text?.includes("Чтобы активировать бота:") ||
+       m.text?.includes("Для продолжения фарма звёзд")) &&
+      m.replyMarkup
     ) || sponsorMsg;
 
     if (!freshMsg?.replyMarkup?.rows) {
@@ -309,6 +315,10 @@ async function handleSponsor(client, sponsorMsg) {
               const eu = (e.message || "").toUpperCase();
               if (eu.includes("CHANNELS_TOO_MUCH") || eu.includes("TOO MANY CHANNELS")) {
                 console.log("[SPONSOR] CHANNELS_TOO_MUCH — skipping this button");
+                await sendAdminNotification(client,
+                  "🚨 Sponsor: Channel Limit Hit",
+                  `Instance: ${INSTANCE_ID}\nCould not join sponsor channel (500 limit reached).\nURL: ${url}`
+                );
               } else if (e.message?.includes("USER_ALREADY_PARTICIPANT") || e.message?.includes("INVITE_REQUEST_SENT")) {
                 console.log("[SPONSOR] Already a member — OK");
               } else {
@@ -317,6 +327,49 @@ async function handleSponsor(client, sponsorMsg) {
             }
           });
 
+        } else if (url.includes("startapp")) {
+          // Webapp sponsor button
+          if (url.includes("patrickgamesbot")) {
+            // Patrick games webapp — join the news channel first
+            console.log("[SPONSOR] Patrick webapp — joining patrickgames_news");
+            await withCaptcha(client, async () => {
+              try {
+                await client.invoke(new Api.channels.JoinChannel({ channel: "patrickgames_news" }));
+                console.log("[SPONSOR] Joined patrickgames_news ✅");
+              } catch (e) {
+                const eu = (e.message || "").toUpperCase();
+                if (eu.includes("CHANNELS_TOO_MUCH") || eu.includes("TOO MANY CHANNELS")) {
+                  console.log("[SPONSOR] CHANNELS_TOO_MUCH on patrickgames_news — skipping");
+                  await sendAdminNotification(client,
+                    "🚨 Sponsor: Channel Limit Hit",
+                    `Instance: ${INSTANCE_ID}\nCould not join patrickgames_news (500 limit reached).`
+                  );
+                } else if (e.message?.includes("USER_ALREADY_PARTICIPANT")) {
+                  console.log("[SPONSOR] Already in patrickgames_news");
+                } else {
+                  console.log(`[SPONSOR] Join patrickgames_news failed (skipping): ${e.message}`);
+                }
+              }
+            });
+          } else {
+            // Other webapp — extract bot name and /start it
+            const webappBotMatch = url.match(/t\.me\/([^/?]+)/);
+            const webappBot = webappBotMatch ? webappBotMatch[1] : null;
+            if (webappBot) {
+              console.log(`[SPONSOR] Webapp — starting bot @${webappBot}`);
+              try {
+                await withCaptcha(client, async () => {
+                  await client.sendMessage(webappBot, { message: "/start" });
+                });
+                await sleep(3000 + Math.random() * 2000);
+                console.log(`[SPONSOR] Bot @${webappBot} started ✅`);
+              } catch (e) {
+                console.log(`[SPONSOR] Failed to start @${webappBot}: ${e.message}`);
+              }
+            } else {
+              console.log(`[SPONSOR] Could not extract bot from webapp URL: ${url}`);
+            }
+          }
         } else {
           console.log(`[SPONSOR] Unrecognised URL — skipping: ${url}`);
         }
@@ -346,9 +399,32 @@ async function handleSponsor(client, sponsorMsg) {
 
     console.log(`[SPONSOR] Verify response: ${verifyPopup || "none"}`);
 
-    // "Подпишись на все каналы" = not all done — retry
+    // "Подпишись на все каналы" = not all done
     if (verifyPopup?.includes("Подпишись на все каналы")) {
-      console.log(`[SPONSOR] Not all completed — retrying (attempt ${attempt})`);
+      console.log(`[SPONSOR] Not all completed (attempt ${attempt}) — trying RequestAppWebView for webapp buttons`);
+      // On verify failure, invoke RequestAppWebView for each webapp button as fallback
+      for (const btn of actionButtons) {
+        const burl = btn.url || "";
+        if (!burl.includes("startapp") || burl.includes("patrickgamesbot")) continue;
+        const webappBotMatch = burl.match(/t\.me\/([^/?]+)/);
+        const webappBot = webappBotMatch ? webappBotMatch[1] : null;
+        if (!webappBot) continue;
+        try {
+          console.log(`[SPONSOR] RequestAppWebView for @${webappBot}...`);
+          const peer = await client.getEntity(webappBot);
+          await client.invoke(new Api.messages.RequestAppWebView({
+            peer: peer,
+            app: new Api.InputBotAppShortName({ botId: peer, shortName: "app" }),
+            platform: "android",
+            startParam: "",
+            writeAllowed: true,
+          }));
+          console.log(`[SPONSOR] RequestAppWebView done for @${webappBot}`);
+        } catch (e) {
+          console.log(`[SPONSOR] RequestAppWebView failed for @${webappBot}: ${e.message}`);
+        }
+        await sleep(2000);
+      }
       await sleep(3000);
       continue;
     }
@@ -507,8 +583,49 @@ async function handleTasks(client, userId) {
           }
         });
       }
-    } else {
-      console.log("[TASK] Web app - will try verify");
+    } else if (url.includes("startapp")) {
+      // Webapp task
+      if (url.includes("patrickgamesbot")) {
+        // Patrick games webapp — join the news channel then verify
+        console.log("[TASK] Patrick webapp — joining patrickgames_news");
+        await withCaptcha(client, async () => {
+          try {
+            await client.invoke(new Api.channels.JoinChannel({ channel: "patrickgames_news" }));
+            console.log("[TASK] Joined patrickgames_news ✅");
+            entity = { type: "channel" };
+          } catch (e) {
+            const errorText = (e.message || "").toUpperCase();
+            if (errorText.includes("CHANNELS_TOO_MUCH") || errorText.includes("TOO MANY CHANNELS")) {
+              throw new Error("CHANNELS_TOO_MUCH");
+            }
+            if (e.message?.includes("USER_ALREADY_PARTICIPANT")) {
+              console.log("[TASK] Already in patrickgames_news");
+              entity = { type: "channel" };
+            } else {
+              console.log(`[TASK] Join patrickgames_news failed: ${e.message}`);
+            }
+          }
+        });
+      } else {
+        // Other webapp — extract bot name and /start it first
+        const webappBotMatch = url.match(/t\.me\/([^/?]+)/);
+        const webappBot = webappBotMatch ? webappBotMatch[1] : null;
+        if (webappBot) {
+          console.log(`[TASK] Webapp — starting bot @${webappBot} first`);
+          try {
+            await withCaptcha(client, async () => {
+              await client.sendMessage(webappBot, { message: "/start" });
+            });
+            await sleep(3000 + Math.random() * 2000);
+            console.log(`[TASK] Bot @${webappBot} started ✅`);
+            entity = { type: "webapp", bot: webappBot, url };
+          } catch (e) {
+            console.log(`[TASK] Failed to start @${webappBot}: ${e.message}`);
+          }
+        } else {
+          console.log(`[TASK] Could not extract bot from webapp URL: ${url}`);
+        }
+      }
     }
 
     // Verify task
@@ -550,6 +667,31 @@ async function handleTasks(client, userId) {
       }
 
       if (popup?.includes("не найдена")) {
+        // If this was a webapp task, try RequestAppWebView as fallback before giving up
+        if (entity?.type === "webapp" && entity.bot) {
+          console.log(`[TASK] Webapp verify failed — trying RequestAppWebView for @${entity.bot}`);
+          try {
+            const peer = await client.getEntity(entity.bot);
+            await client.invoke(new Api.messages.RequestAppWebView({
+              peer: peer,
+              app: new Api.InputBotAppShortName({ botId: peer, shortName: "app" }),
+              platform: "android",
+              startParam: "",
+              writeAllowed: true,
+            }));
+            console.log(`[TASK] RequestAppWebView done — re-verifying...`);
+            await sleep(3000 + Math.random() * 2000);
+            const popup2 = await getCallbackAnswer(client, taskMsg, buttons.verify.data);
+            console.log(`[TASK] Re-verify popup: ${popup2 || "none"}`);
+            if (popup2?.includes("выполнено") || popup2?.includes("получена")) {
+              console.log("[TASK] ✅ Success after RequestAppWebView!");
+              completed++;
+              break;
+            }
+          } catch (e) {
+            console.log(`[TASK] RequestAppWebView failed: ${e.message}`);
+          }
+        }
         console.log("[TASK] ❌ Failed");
         if (buttons.skip) {
           await withCaptcha(client, async () => {
@@ -561,9 +703,9 @@ async function handleTasks(client, userId) {
         continue;
       }
       
-      // If we joined but unclear result, assume success
+      // If we joined/started but unclear result, assume success
       if (entity) {
-        console.log("[TASK] ✅ Joined - assuming success");
+        console.log("[TASK] ✅ Joined/started - assuming success");
         completed++;
         break;
       }
@@ -670,7 +812,9 @@ async function doClicker(client, userId) {
     console.log("[CLICKER] Sponsor screen detected mid-click — resolving...");
     const sponsorMsgs = await client.getMessages(BOT, { limit: 5 });
     const sponsorMsg = sponsorMsgs.find(m =>
-      m.text?.includes("Чтобы активировать бота:") && m.replyMarkup
+      (m.text?.includes("Чтобы активировать бота:") ||
+       m.text?.includes("Для продолжения фарма звёзд")) &&
+      m.replyMarkup
     );
     if (sponsorMsg) {
       const resolved = await handleSponsor(client, sponsorMsg);
@@ -766,10 +910,33 @@ async function doDaily(client, userId) {
   }
 
   console.log(`[DEBUG-DAILY] Profile found, clicking Daily reward`);
+
+  let dailyPopup = null;
   await withCaptcha(client, async () => {
-    await profile.click({ text: "🎁 Ежедневка" });
+    const dailyBtn = findButton(profile, "Ежедневка");
+    if (dailyBtn?.data) {
+      dailyPopup = await getCallbackAnswer(client, profile, dailyBtn.data);
+      console.log(`[DAILY] Popup: ${dailyPopup || "none"}`);
+    } else {
+      await profile.click({ text: "🎁 Ежедневка" });
+    }
     await sleep(delay());
   });
+
+  // Check for profile link / privacy settings error
+  if (dailyPopup?.includes("Сначала поставь свою личную ссылку")) {
+    console.log("[DAILY] ⚠️ Profile link required — notifying admin");
+    await sendAdminNotification(client,
+      "⚠️ Daily: Profile Link Required",
+      `Instance: ${INSTANCE_ID}\nUser: ${userId}\n\nBot requires personal link in bio or privacy settings change.`
+    );
+    // Still schedule next daily on normal 24h cycle
+    await updateAccount(userId, {
+      next_daily_time: new Date(Date.now() + DAILY * 60000).toISOString(),
+      last_error: "Profile link required for daily",
+    });
+    return false;
+  }
 
   console.log(`[DEBUG-DAILY] Daily clicked, updating database`);
   const { data } = await supabase.from("accounts").select("total_dailies").eq("user_id", userId).single();
@@ -833,6 +1000,10 @@ User: ${acc.user_id}`);
       });
     } else if (error.message === "SPONSOR_UNRESOLVABLE") {
       console.log("[SPONSOR] Unresolvable after 3 attempts — delaying account");
+      await sendAdminNotification(client,
+        "🚨 Sponsor: Unresolvable After 3 Attempts",
+        `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\nUser: ${acc.user_id}\n\nAll 3 sponsor verification attempts failed.`
+      );
       await updateAccount(acc.user_id, {
         next_clicker_time: new Date(Date.now() + delayMinutes(SPONSOR_DELAY) * 60000).toISOString(),
         last_error: "Sponsor screen unresolvable after 3 attempts",
