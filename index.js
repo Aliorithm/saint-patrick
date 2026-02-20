@@ -694,60 +694,83 @@ async function doClicker(client, userId) {
 // DAILY
 // ============================================
 async function doDaily(client, userId) {
-  console.log("[DAILY] Starting...");
+  console.log('[DAILY] Starting...');
   const menu = await ensureMenu(client);
 
-  // Navigate to Profile using callback data
-  await withCaptcha(client, async () => {
-    await sleep(jitter());
-    const btn = findButton(menu, "Профиль");
-    await clickBtn(client, menu, btn) ?? await menu.click({ text: "👤 Профиль" });
-    await sleep(jitter());
-  });
+  // Step 1: Navigate to Profile using callback data (never use text-click — unreliable)
+  const profileBtn = findButton(menu, 'Профиль');
+  if (profileBtn?.data) {
+    await getCallbackAnswer(client, menu, profileBtn.data);
+  } else {
+    try { await menu.click({ text: '👤 Профиль' }); } catch (_) {}
+  }
 
-  const msgs    = await client.getMessages(BOT, { limit: 3 });
-  const profile = msgs.find(m => m.replyMarkup && m.text?.includes("Профиль"));
-  if (!profile) throw new Error("PROFILE_NOT_FOUND");
+  // Wait for the profile page to render, then clear any captcha before reading messages
+  await sleep(3000);
+  await solveCaptcha(client);
+  await sleep(2000);
 
-  // Click daily reward
-  let popup = null;
-  await withCaptcha(client, async () => {
-    const btn = findButton(profile, "Ежедневка");
-    popup = await clickBtn(client, profile, btn) ?? null;
-    if (!btn?.data) await profile.click({ text: "🎁 Ежедневка" });
-    console.log(`[DAILY] Popup: ${popup || "none"}`);
-    await sleep(jitter());
-  });
+  // Step 2: Fetch FRESH messages — critical, stale IDs cause MESSAGE_ID_INVALID
+  let msgs    = await client.getMessages(BOT, { limit: 5 });
+  let profile = msgs.find(m => m.replyMarkup && m.text?.includes('Профиль'));
+  if (!profile) {
+    // Bot can be slow — wait and retry once more
+    await sleep(4000);
+    msgs    = await client.getMessages(BOT, { limit: 5 });
+    profile = msgs.find(m => m.replyMarkup && m.text?.includes('Профиль'));
+    if (!profile) throw new Error('PROFILE_NOT_FOUND');
+  }
+  console.log('[DAILY] Profile found, clicking Ежедневка...');
 
-  if (popup?.includes("Сначала поставь свою личную ссылку")) {
-    console.log("[DAILY] ⚠️ Profile link required");
-    await notify(client, "⚠️ Daily: Profile Link Required",
-      `Instance: ${INSTANCE_ID}\nUser: ${userId}\nBot requires personal link.`);
+  // Step 3: Click daily button on the freshly fetched profile message
+  const dailyBtn = findButton(profile, 'Ежедневка');
+  if (!dailyBtn?.data) throw new Error('DAILY_BTN_NOT_FOUND');
+
+  await sleep(1500 + Math.random() * 1000);
+  const popup = await getCallbackAnswer(client, profile, dailyBtn.data);
+  console.log(`[DAILY] Popup: ${popup || 'none'}`);
+
+  // Step 4: Bot sometimes sends captcha instead of popup — handle it
+  await sleep(2000);
+  const captchaSolved = await solveCaptcha(client);
+
+  if (captchaSolved) {
+    console.log('[DAILY] Captcha solved — daily registered');
+    // fall through to success
+  } else if (popup === null || popup === 'MESSAGE_EXPIRED') {
+    console.log('[DAILY] ⚠️ No response — retrying in 5min');
+    await updateAccount(userId, {
+      next_daily_time: new Date(Date.now() + 5 * 60000).toISOString(),
+    });
+    return false;
+  } else if (popup?.includes('Сначала поставь свою личную ссылку')) {
+    console.log('[DAILY] ⚠️ Profile link required');
+    await notify(client, '⚠️ Daily: Profile Link Required',
+      `Instance: ${INSTANCE_ID}
+User: ${userId}`);
     await updateAccount(userId, {
       next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
-      last_error: "Profile link required for daily",
+      last_error: 'Profile link required',
+    });
+    return false;
+  } else if (popup?.includes('уже получил') || popup?.includes('приходи завтра')) {
+    console.log('[DAILY] Already claimed — rescheduling');
+    await updateAccount(userId, {
+      next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
     });
     return false;
   }
 
-  // Already claimed today
-  if (popup?.includes("уже получил") || popup?.includes("приходи завтра")) {
-    console.log("[DAILY] Already claimed today — rescheduling");
-    await updateAccount(userId, {
-      next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
-    });
-    return false;
-  }
-
+  // Success
   const { data } = await supabase
-    .from("accounts").select("total_dailies").eq("user_id", userId).single();
+    .from('accounts').select('total_dailies').eq('user_id', userId).single();
   await updateAccount(userId, {
     next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
-    last_daily_at: new Date().toISOString(),
-    total_dailies: (data?.total_dailies || 0) + 1,
+    last_daily_at:   new Date().toISOString(),
+    total_dailies:   (data?.total_dailies || 0) + 1,
     error_count: 0, last_error: null,
   });
-  console.log("[DAILY] ✅ Success");
+  console.log('[DAILY] ✅ Success');
   return true;
 }
 
@@ -805,10 +828,14 @@ async function processAccount(acc) {
       try { await doDaily(client, acc.user_id); }
       catch (e) {
         console.error(`[DAILY] ❌ ${e.message}`);
-        if (e.message === "SPONSOR_UNRESOLVABLE" || e.message === "MENU_NOT_FOUND") {
+        // Transient errors: reschedule in 15min, don't count against error limit
+        const transient = ["SPONSOR_UNRESOLVABLE", "MENU_NOT_FOUND", "PROFILE_NOT_FOUND",
+          "DAILY_BTN_NOT_FOUND", "MESSAGE_ID_INVALID", "TIMEOUT"].some(t => e.message.includes(t));
+        if (transient) {
+          console.log("[DAILY] Transient — rescheduling in 15min");
           await updateAccount(acc.user_id, {
-            next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
-            last_error: e.message,
+            next_daily_time: new Date(Date.now() + 15 * 60000).toISOString(),
+            last_error: e.message.substring(0, 100),
           });
         } else {
           await incrementError(acc.user_id, e.message);
