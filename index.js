@@ -25,11 +25,11 @@ const CAP_LIMIT = 25;
 const CAP_DELAY = () => 120 + Math.floor(Math.random() * 181); // 2h to 5h random
 const DAILY = (24 * 60) + Math.floor(Math.random() * 120); // 24h to 26h random
 const DAILY_LIMIT_DELAY = 10 * 60;
-const SPONSOR_DELAY = 10 * 60;
+const SPONSOR_DELAY = 2 * 60;
 const CHANNEL_LIMIT_DELAY = 10 * 60;
 const NO_TASKS_DELAY = 30;
-const LEAVE_DELAY_MIN = 24 * 60;  // 24h in minutes
-const LEAVE_DELAY_MAX = 48 * 60;  // 48h in minutes
+const LEAVE_DELAY_MIN = 20 * 60;  // 20h in minutes
+const LEAVE_DELAY_MAX = 30 * 60;  // 30h in minutes
 
 // ============================================
 // SUPABASE
