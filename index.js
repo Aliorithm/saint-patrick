@@ -236,6 +236,25 @@ async function withCaptcha(client, action) {
   await solveCaptcha(client);
 }
 
+function resolveUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const redirectParam = parsed.searchParams.get("redirect_url")
+      || parsed.searchParams.get("redirectUrl")
+      || parsed.searchParams.get("redirect")
+      || parsed.searchParams.get("url")
+      || parsed.searchParams.get("link");
+    if (redirectParam) {
+      const decoded = decodeURIComponent(redirectParam);
+      console.log(`[URL] Resolved redirect: ${url.substring(0, 60)}... → ${decoded}`);
+      return decoded;
+    }
+  } catch (e) {
+    // Not a valid URL — return as-is
+  }
+  return url;
+}
+
 // ============================================
 // SPONSOR HANDLER
 // ============================================
@@ -278,8 +297,9 @@ async function handleSponsor(client, sponsorMsg) {
 
     // Process each button one by one with human-like delays
     for (const btn of actionButtons) {
-      const url  = btn.url  || "";
-      const text = btn.text || "";
+      const rawUrl = btn.url || "";
+      const url    = resolveUrl(rawUrl);  // unwrap tracker/redirect if present
+      const text   = btn.text || "";
       console.log(`[SPONSOR] Processing: "${text}" -> ${url}`);
 
       await sleep(2000 + Math.random() * 2000);
@@ -371,7 +391,10 @@ async function handleSponsor(client, sponsorMsg) {
             }
           }
         } else {
-          console.log(`[SPONSOR] Unrecognised URL — skipping: ${url}`);
+          // Unknown URL — simulate visiting it (sleep like webapp open)
+          console.log(`[SPONSOR] Unknown URL — simulating visit (4-7s): ${url}`);
+          await sleep(4000 + Math.random() * 3000);
+          console.log(`[SPONSOR] Visit simulated ✅`);
         }
 
       } catch (e) {
@@ -404,7 +427,7 @@ async function handleSponsor(client, sponsorMsg) {
       console.log(`[SPONSOR] Not all completed (attempt ${attempt}) — trying RequestAppWebView for webapp buttons`);
       // On verify failure, invoke RequestAppWebView for each webapp button as fallback
       for (const btn of actionButtons) {
-        const burl = btn.url || "";
+        const burl = resolveUrl(btn.url || "");
         if (!burl.includes("startapp") || burl.includes("patrickgamesbot")) continue;
         const webappBotMatch = burl.match(/t\.me\/([^/?]+)/);
         const webappBot = webappBotMatch ? webappBotMatch[1] : null;
@@ -534,8 +557,8 @@ async function handleTasks(client, userId) {
       break;
     }
 
-    const url = buttons.action.url;
-    console.log(`[TASK] Action: ${buttons.action.text}`);
+    const url = resolveUrl(buttons.action.url || "");
+    console.log(`[TASK] Action: ${buttons.action.text} -> ${url}`);
 
     // Handle different task types
     let entity = null;
@@ -553,7 +576,7 @@ async function handleTasks(client, userId) {
         entity = { type: "bot" };
       }
     } else if (!url.includes("startapp")) {
-      // Channel/Group task
+      // Channel/Group task — or unknown URL fallback
       const match = url.match(/t\.me\/(.+)/);
       if (match) {
         const identifier = match[1];
@@ -582,6 +605,12 @@ async function handleTasks(client, userId) {
             }
           }
         });
+      } else {
+        // Not a t.me URL — simulate visiting it
+        console.log(`[TASK] Unknown URL — simulating visit (4-7s): ${url}`);
+        await sleep(4000 + Math.random() * 3000);
+        console.log(`[TASK] Visit simulated ✅`);
+        entity = { type: "unknown" };
       }
     } else if (url.includes("startapp")) {
       // Webapp task
