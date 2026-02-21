@@ -172,7 +172,7 @@ async function solveCaptcha(client) {
     for (const row of captcha.replyMarkup.rows)
       for (const btn of row.buttons)
         if (btn.text === answer.toString()) {
-          await captcha.click({ data: btn.data });
+          try { await getCallbackAnswer(client, captcha, btn.data); } catch (_) {}
           console.log("[CAPTCHA] Solved ✅");
           await sleep(2000);
           return true;
@@ -195,7 +195,7 @@ async function solveCaptcha(client) {
       for (const row of captcha.replyMarkup.rows)
         for (const btn of row.buttons)
           if (btn.text === emoji) {
-            await captcha.click({ data: btn.data });
+            try { await getCallbackAnswer(client, captcha, btn.data); } catch (_) {}
             console.log("[CAPTCHA] Solved ✅");
             await sleep(2000);
             return true;
@@ -406,11 +406,18 @@ async function handleTasks(client, userId) {
   console.log("[TASK] Starting...");
   const menu = await ensureMenu(client);
 
-  // Navigate to tasks
+  // Navigate to tasks — re-fetch fresh right before clicking to avoid stale message ID
+  await sleep(1000);
+  let freshTaskMsgs = await client.getMessages(BOT, { limit: 5 });
+  let freshMenu     = freshTaskMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup) || menu;
   await withCaptcha(client, async () => {
     await sleep(jitter());
-    const btn = findButton(menu, "Задания");
-    await clickBtn(client, menu, btn) ?? await menu.click({ text: "📝 Задания" });
+    const btn = findButton(freshMenu, "Задания");
+    if (btn?.data) {
+      await getCallbackAnswer(client, freshMenu, btn.data);
+    } else {
+      try { await freshMenu.click({ text: "📝 Задания" }); } catch (_) {}
+    }
     await sleep(jitter());
   });
 
@@ -500,7 +507,7 @@ async function handleTasks(client, userId) {
     if (!buttons.verify) {
       if (buttons.skip) await withCaptcha(client, async () => {
         await sleep(1500);
-        await taskMsg.click({ data: buttons.skip.data });
+        await getCallbackAnswer(client, taskMsg, buttons.skip.data);
         await sleep(2000);
       });
       else break;
@@ -547,7 +554,7 @@ async function handleTasks(client, userId) {
     if (buttons.skip) {
       await withCaptcha(client, async () => {
         await sleep(1500);
-        await taskMsg.click({ data: buttons.skip.data });
+        await getCallbackAnswer(client, taskMsg, buttons.skip.data);
         await sleep(2000);
       });
     } else break;
@@ -560,26 +567,37 @@ async function handleTasks(client, userId) {
 // ============================================
 // CLICKER
 // ============================================
+// ============================================
+// CLICKER
+// ============================================
 async function doClicker(client, userId) {
   console.log("[CLICKER] Starting...");
+
+  // Always fetch a fresh menu right before clicking — stale IDs cause MESSAGE_ID_INVALID
   const menu = await ensureMenu(client);
+  await sleep(1500 + Math.random() * 1000);
+
+  // Re-fetch fresh to ensure message ID is current
+  let freshMsgs = await client.getMessages(BOT, { limit: 5 });
+  let freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
+  if (!freshMenu) freshMenu = menu; // fallback to ensureMenu result
 
   let popup = null;
-  await withCaptcha(client, async () => {
-    await sleep(jitter());
-    const btn = findButton(menu, "Кликер");
-    if (btn?.data) {
-      popup = await getCallbackAnswer(client, menu, btn.data);
-      console.log(`[CLICKER] Popup: ${popup || "none"}`);
-    } else {
-      await menu.click({ text: "✨ Кликер" });
-    }
-  });
+  const clickerBtn = findButton(freshMenu, "Кликер");
+  if (clickerBtn?.data) {
+    popup = await getCallbackAnswer(client, freshMenu, clickerBtn.data);
+    console.log(`[CLICKER] Popup: ${popup || "none"}`);
+  } else {
+    try { await freshMenu.click({ text: "✨ Кликер" }); } catch (_) {}
+  }
 
-  // Check whether captcha appeared instead of popup
-  const afterMsgs   = await client.getMessages(BOT, { limit: 3 });
-  const hadCaptcha  = !afterMsgs.find(m => m.text?.includes("ПРОВЕРКА НА РОБОТА"));
-  const captchaClick = popup === null && hadCaptcha;
+  // Brief wait then check/solve captcha
+  await sleep(1500);
+  await solveCaptcha(client);
+
+  // Check whether captcha appeared instead of popup (popup null + no captcha in msgs now = captcha was shown and solved)
+  const afterMsgs  = await client.getMessages(BOT, { limit: 3 });
+  const captchaClick = popup === null && !afterMsgs.find(m => m.text?.includes("ПРОВЕРКА НА РОБОТА"));
 
   // Daily click limit
   if (popup?.includes("завтра") || popup?.includes("слишком много")) {
@@ -604,24 +622,30 @@ async function doClicker(client, userId) {
     }
     if (result !== true) { console.log("[CLICKER] Tasks failed"); return false; }
 
-    // Click again after tasks
+    // Re-fetch fresh menu and click again after tasks
     console.log("[CLICKER] Tasks done — clicking again...");
-    await withCaptcha(client, async () => {
-      await sleep(jitter());
-      await client.sendMessage(BOT, { message: "/start" });
-      await sleep(4000);
-    });
-    const menu2 = await ensureMenu(client);
-    await withCaptcha(client, async () => {
-      await sleep(jitter());
-      const btn2 = findButton(menu2, "Кликер");
-      if (btn2?.data) {
-        popup = await getCallbackAnswer(client, menu2, btn2.data);
-        console.log(`[CLICKER] Popup after tasks: ${popup || "none"}`);
-      } else {
-        await menu2.click({ text: "✨ Кликер" });
-      }
-    });
+    await client.sendMessage(BOT, { message: "/start" });
+    await sleep(4000);
+    await solveCaptcha(client);
+
+    freshMsgs = await client.getMessages(BOT, { limit: 5 });
+    freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
+    if (!freshMenu) throw new Error("MENU_NOT_FOUND");
+
+    await sleep(1500 + Math.random() * 1000);
+    // Re-fetch one more time right before clicking
+    freshMsgs = await client.getMessages(BOT, { limit: 5 });
+    freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup) || freshMenu;
+
+    const btn2 = findButton(freshMenu, "Кликер");
+    if (btn2?.data) {
+      popup = await getCallbackAnswer(client, freshMenu, btn2.data);
+      console.log(`[CLICKER] Popup after tasks: ${popup || "none"}`);
+    } else {
+      try { await freshMenu.click({ text: "✨ Кликер" }); } catch (_) {}
+    }
+    await sleep(1500);
+    await solveCaptcha(client);
   }
 
   // Sponsor mid-click
@@ -644,7 +668,7 @@ async function doClicker(client, userId) {
     throw new Error("SPONSOR_UNRESOLVABLE");
   }
 
-  // Captcha after click
+  // Final captcha check (bot sometimes sends it after click with a delay)
   await sleep(jitter());
   const captchaSolved = await solveCaptcha(client);
 
@@ -689,6 +713,7 @@ async function doClicker(client, userId) {
   console.log(`[CLICKER] ✅ Success (cap: ${currentCap}/${CAP_LIMIT})`);
   return true;
 }
+
 
 // ============================================
 // DAILY
@@ -812,10 +837,12 @@ async function processAccount(acc) {
             next_clicker_time: new Date(Date.now() + (SPONSOR_DELAY + CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
             last_error: "Sponsor unresolvable after 3 attempts",
           });
-        } else if (e.message === "MENU_NOT_FOUND") {
+        } else if (["MENU_NOT_FOUND", "MESSAGE_ID_INVALID", "TIMEOUT"].some(t => e.message.includes(t))) {
+          // Transient — bot was slow or message stale, retry next cycle silently
+          console.log("[CLICKER] Transient error — rescheduling");
           await updateAccount(acc.user_id, {
             next_clicker_time: nextClickerTime(),
-            last_error: "Menu not found",
+            last_error: e.message.substring(0, 100),
           });
         } else {
           await incrementError(acc.user_id, e.message);
