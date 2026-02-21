@@ -16,20 +16,20 @@ const API_HASH    = process.env.API_HASH;
 const PORT        = process.env.PORT || 10000;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const jitter = () => 4000 + Math.random() * 2000; // human-like action delay
+const jitter = () => 4000 + Math.random() * 2000;
 
-// TIME DELAYS (minutes) — all functions so each call gets a fresh random value
-const CLICKER_MIN       = 8;
-const CLICKER_MAX       = 10;
-const CAP_LIMIT         = 25;
-const CAP_DELAY         = () => 120 + Math.floor(Math.random() * 181);   // 2–5h
-const DAILY_DELAY       = () => (24 * 60) + Math.floor(Math.random() * 120); // 24–26h
-const DAILY_LIMIT_DELAY = 10 * 60;
-const SPONSOR_DELAY     = 2 * 60;
+// TIME DELAYS (minutes)
+const CLICKER_MIN         = 8;
+const CLICKER_MAX         = 10;
+const CAP_LIMIT           = 25;
+const CAP_DELAY           = () => 120 + Math.floor(Math.random() * 181);        // 2–5h random
+const DAILY_DELAY         = () => (24 * 60) + Math.floor(Math.random() * 120);  // 24–26h random (fn so each call differs)
+const DAILY_LIMIT_DELAY   = 10 * 60;
+const SPONSOR_DELAY       = 10 * 60;
 const CHANNEL_LIMIT_DELAY = 10 * 60;
-const NO_TASKS_DELAY    = 30;
-const LEAVE_DELAY_MIN   = 20 * 60;
-const LEAVE_DELAY_MAX   = 30 * 60;
+const NO_TASKS_DELAY      = 30;
+const LEAVE_DELAY_MIN     = 24 * 60;
+const LEAVE_DELAY_MAX     = 48 * 60;
 
 const nextClickerTime = () =>
   new Date(Date.now() + (CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString();
@@ -88,6 +88,8 @@ async function notify(client, title, details) {
 // ============================================
 // HELPERS
 // ============================================
+
+// Safe callback click — catches MESSAGE_ID_INVALID so it never leaks
 async function getCallbackAnswer(client, msg, data) {
   try {
     const r = await client.invoke(new Api.messages.GetBotCallbackAnswer({
@@ -95,11 +97,11 @@ async function getCallbackAnswer(client, msg, data) {
     }));
     return r.message || null;
   } catch (e) {
-    return e.message?.includes("MESSAGE_ID_INVALID") ? "MESSAGE_EXPIRED" : null;
+    if (e.message?.includes("MESSAGE_ID_INVALID")) return "MESSAGE_EXPIRED";
+    return null;
   }
 }
 
-// Find a button by partial text, return the button object (has .data and .url)
 function findButton(msg, textPart) {
   if (!msg?.replyMarkup?.rows) return null;
   for (const row of msg.replyMarkup.rows)
@@ -108,31 +110,7 @@ function findButton(msg, textPart) {
   return null;
 }
 
-// Click a button using its callback data — more reliable than text-based click
-async function clickBtn(client, msg, btn) {
-  if (btn?.data) return await getCallbackAnswer(client, msg, btn.data);
-  return null;
-}
-
-// Decode tracker/redirect wrapper URLs to get the real destination
-function resolveUrl(url) {
-  try {
-    const p = new URL(url);
-    const real = p.searchParams.get("redirect_url")
-      || p.searchParams.get("redirectUrl")
-      || p.searchParams.get("redirect")
-      || p.searchParams.get("url")
-      || p.searchParams.get("link");
-    if (real) {
-      const decoded = decodeURIComponent(real);
-      console.log(`[URL] Redirect: ${url.substring(0, 50)}... → ${decoded}`);
-      return decoded;
-    }
-  } catch (_) {}
-  return url;
-}
-
-// Join a channel or group — handles private (+hash) and public identifiers
+// Join a channel — centralised so CHANNELS_TOO_MUCH always surfaces correctly
 async function joinChannel(client, identifier, tag) {
   try {
     if (identifier.startsWith("+")) {
@@ -144,7 +122,8 @@ async function joinChannel(client, identifier, tag) {
     return "joined";
   } catch (e) {
     const eu = (e.message || "").toUpperCase();
-    if (eu.includes("CHANNELS_TOO_MUCH") || eu.includes("TOO MANY CHANNELS")) throw new Error("CHANNELS_TOO_MUCH");
+    if (eu.includes("CHANNELS_TOO_MUCH") || eu.includes("TOO MANY CHANNELS"))
+      throw new Error("CHANNELS_TOO_MUCH");
     if (e.message?.includes("USER_ALREADY_PARTICIPANT") || e.message?.includes("INVITE_REQUEST_SENT")) {
       console.log(`[${tag}] Already a member`);
       return "already";
@@ -152,6 +131,21 @@ async function joinChannel(client, identifier, tag) {
     console.log(`[${tag}] Join failed (skipping): ${e.message}`);
     return "failed";
   }
+}
+
+// Decode tracker/redirect URLs
+function resolveUrl(url) {
+  try {
+    const p = new URL(url);
+    const real = p.searchParams.get("redirect_url") || p.searchParams.get("redirectUrl")
+      || p.searchParams.get("redirect") || p.searchParams.get("url") || p.searchParams.get("link");
+    if (real) {
+      const decoded = decodeURIComponent(real);
+      console.log(`[URL] Redirect → ${decoded}`);
+      return decoded;
+    }
+  } catch (_) {}
+  return url;
 }
 
 // ============================================
@@ -172,7 +166,8 @@ async function solveCaptcha(client) {
     for (const row of captcha.replyMarkup.rows)
       for (const btn of row.buttons)
         if (btn.text === answer.toString()) {
-          try { await getCallbackAnswer(client, captcha, btn.data); } catch (_) {}
+          // Use getCallbackAnswer — raw .click() can throw MESSAGE_ID_INVALID
+          await getCallbackAnswer(client, captcha, btn.data);
           console.log("[CAPTCHA] Solved ✅");
           await sleep(2000);
           return true;
@@ -182,11 +177,11 @@ async function solveCaptcha(client) {
 
   // Fruit emoji captcha
   const fruits = {
-    "Киви": "🥝", "киви": "🥝", "Банан": "🍌", "банан": "🍌",
-    "Арбуз": "🍉", "арбуз": "🍉", "Апельсин": "🍊", "апельсин": "🍊",
-    "Клубника": "🍓", "клубника": "🍓", "Виноград": "🍇", "виноград": "🍇",
-    "Яблоко": "🍎", "яблоко": "🍎", "Вишня": "🍒", "вишня": "🍒",
-    "Кокос": "🥥", "кокос": "🥥", "Помидор": "🍅", "помидор": "🍅",
+    "Киви":"🥝","киви":"🥝","Банан":"🍌","банан":"🍌",
+    "Арбуз":"🍉","арбуз":"🍉","Апельсин":"🍊","апельсин":"🍊",
+    "Клубника":"🍓","клубника":"🍓","Виноград":"🍇","виноград":"🍇",
+    "Яблоко":"🍎","яблоко":"🍎","Вишня":"🍒","вишня":"🍒",
+    "Кокос":"🥥","кокос":"🥥","Помидор":"🍅","помидор":"🍅",
   };
   for (const [name, emoji] of Object.entries(fruits)) {
     if (captcha.text.includes(name)) {
@@ -195,7 +190,7 @@ async function solveCaptcha(client) {
       for (const row of captcha.replyMarkup.rows)
         for (const btn of row.buttons)
           if (btn.text === emoji) {
-            try { await getCallbackAnswer(client, captcha, btn.data); } catch (_) {}
+            await getCallbackAnswer(client, captcha, btn.data);
             console.log("[CAPTCHA] Solved ✅");
             await sleep(2000);
             return true;
@@ -229,11 +224,12 @@ async function ensureMenu(client) {
 
   // Check for blocking sponsor screens
   const sponsorMsg = msgs.find(m =>
-    (m.text?.includes("Чтобы активировать бота:") || m.text?.includes("Для продолжения фарма звёзд")) &&
+    (m.text?.includes("Чтобы активировать бота:") ||
+     m.text?.includes("Для продолжения фарма звёзд")) &&
     m.replyMarkup
   );
   if (sponsorMsg) {
-    console.log(`[SPONSOR] Blocking screen detected — resolving...`);
+    console.log(`[SPONSOR] Blocking screen — resolving...`);
     const resolved = await handleSponsor(client, sponsorMsg);
     if (!resolved) throw new Error("SPONSOR_UNRESOLVABLE");
     await sleep(5000);
@@ -264,7 +260,8 @@ async function handleSponsor(client, sponsorMsg) {
 
     const msgs     = await client.getMessages(BOT, { limit: 5 });
     const freshMsg = msgs.find(m =>
-      (m.text?.includes("Чтобы активировать бота:") || m.text?.includes("Для продолжения фарма звёзд")) &&
+      (m.text?.includes("Чтобы активировать бота:") ||
+       m.text?.includes("Для продолжения фарма звёзд")) &&
       m.replyMarkup
     ) || sponsorMsg;
 
@@ -304,7 +301,9 @@ async function handleSponsor(client, sponsorMsg) {
 
         } else if (url.includes("startapp")) {
           if (url.includes("patrickgamesbot")) {
-            await withCaptcha(client, async () => { await joinChannel(client, "patrickgames_news", "SPONSOR"); });
+            await withCaptcha(client, async () => {
+              await joinChannel(client, "patrickgames_news", "SPONSOR");
+            });
           } else {
             const bot = url.match(/t\.me\/([^/?]+)/)?.[1];
             if (bot) {
@@ -322,12 +321,12 @@ async function handleSponsor(client, sponsorMsg) {
         }
       } catch (e) {
         if (e.message === "CHANNELS_TOO_MUCH") {
-          await notify(client, "🚨 Sponsor: Channel Limit", `Instance: ${INSTANCE_ID}\nURL: ${url}`);
+          await notify(client, "🚨 Sponsor: Channel Limit",
+            `Instance: ${INSTANCE_ID}\nURL: ${url}`);
         } else {
           console.log(`[SPONSOR] Button error (skipping): ${e.message}`);
         }
       }
-
       await sleep(1500 + Math.random() * 1500);
     }
 
@@ -339,7 +338,7 @@ async function handleSponsor(client, sponsorMsg) {
     console.log(`[SPONSOR] Verify: ${verifyPopup || "none"}`);
 
     if (verifyPopup?.includes("Подпишись на все каналы")) {
-      console.log(`[SPONSOR] Not all done — trying RequestAppWebView fallback`);
+      console.log(`[SPONSOR] Not all done — RequestAppWebView fallback`);
       for (const btn of actionBtns) {
         const burl = resolveUrl(btn.url || "");
         if (!burl.includes("startapp") || burl.includes("patrickgamesbot")) continue;
@@ -378,7 +377,9 @@ async function leaveChannels(client, userId) {
   catch (e) { console.log(`[LEAVE] getDialogs failed: ${e.message}`); return 0; }
 
   const channels = dialogs.filter(d =>
-    d.entity?.className === "Channel" && d.entity?.broadcast === true && d.entity?.megagroup !== true
+    d.entity?.className === "Channel" &&
+    d.entity?.broadcast === true &&
+    d.entity?.megagroup !== true
   );
   console.log(`[LEAVE] ${channels.length} broadcast channel(s)`);
 
@@ -406,10 +407,11 @@ async function handleTasks(client, userId) {
   console.log("[TASK] Starting...");
   const menu = await ensureMenu(client);
 
-  // Navigate to tasks — re-fetch fresh right before clicking to avoid stale message ID
+  // Re-fetch fresh before clicking to avoid stale message ID
   await sleep(1000);
-  let freshTaskMsgs = await client.getMessages(BOT, { limit: 5 });
-  let freshMenu     = freshTaskMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup) || menu;
+  const freshMsgs = await client.getMessages(BOT, { limit: 5 });
+  const freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup) || menu;
+
   await withCaptcha(client, async () => {
     await sleep(jitter());
     const btn = findButton(freshMenu, "Задания");
@@ -435,7 +437,6 @@ async function handleTasks(client, userId) {
     const taskMsg = msgs.find(m => m.text?.includes("Новое задание") && m.replyMarkup);
     if (!taskMsg) { console.log("[TASK] No more tasks"); break; }
 
-    // Parse buttons
     const buttons = {};
     for (const row of taskMsg.replyMarkup.rows)
       for (const btn of row.buttons) {
@@ -451,9 +452,7 @@ async function handleTasks(client, userId) {
     console.log(`[TASK] ${buttons.action.text} → ${url}`);
     let entity = null;
 
-    // --- Execute the task action ---
     if (url.includes("?start=") && !url.includes("startapp")) {
-      // Bot task
       const m = url.match(/t\.me\/([^?]+)\?start=(.+)/);
       if (m) {
         console.log(`[TASK] Bot: @${m[1]}`);
@@ -465,7 +464,6 @@ async function handleTasks(client, userId) {
       }
 
     } else if (url.includes("startapp")) {
-      // Webapp task
       if (url.includes("patrickgamesbot")) {
         console.log("[TASK] Patrick webapp");
         await withCaptcha(client, async () => {
@@ -487,7 +485,6 @@ async function handleTasks(client, userId) {
       }
 
     } else {
-      // Channel or unknown URL
       const m = url.match(/t\.me\/(.+)/);
       if (m) {
         const id = m[1].split("?")[0];
@@ -503,14 +500,14 @@ async function handleTasks(client, userId) {
       }
     }
 
-    // --- Verify ---
     if (!buttons.verify) {
-      if (buttons.skip) await withCaptcha(client, async () => {
-        await sleep(1500);
-        await getCallbackAnswer(client, taskMsg, buttons.skip.data);
-        await sleep(2000);
-      });
-      else break;
+      if (buttons.skip) {
+        await withCaptcha(client, async () => {
+          await sleep(1500);
+          await getCallbackAnswer(client, taskMsg, buttons.skip.data);
+          await sleep(2000);
+        });
+      } else break;
       continue;
     }
 
@@ -522,7 +519,7 @@ async function handleTasks(client, userId) {
       msgs = await client.getMessages(BOT, { limit: 3 });
       const ok = msgs.find(m => m.text?.includes("выполнено") || m.text?.includes("получена"));
       if (ok || entity) { console.log("[TASK] ✅ Success"); completed++; break; }
-      popup = null; // fall through to skip
+      popup = null;
     }
 
     console.log(`[TASK] Popup: ${popup || "none"}`);
@@ -532,7 +529,6 @@ async function handleTasks(client, userId) {
     }
 
     if (popup?.includes("не найдена") && entity?.type === "webapp") {
-      // RequestAppWebView fallback for webapps
       try {
         const peer = await client.getEntity(entity.bot);
         await client.invoke(new Api.messages.RequestAppWebView({
@@ -550,7 +546,6 @@ async function handleTasks(client, userId) {
 
     if (entity) { console.log("[TASK] ✅ Assuming success"); completed++; break; }
 
-    // Skip
     if (buttons.skip) {
       await withCaptcha(client, async () => {
         await sleep(1500);
@@ -567,37 +562,34 @@ async function handleTasks(client, userId) {
 // ============================================
 // CLICKER
 // ============================================
-// ============================================
-// CLICKER
-// ============================================
 async function doClicker(client, userId) {
   console.log("[CLICKER] Starting...");
-
-  // Always fetch a fresh menu right before clicking — stale IDs cause MESSAGE_ID_INVALID
   const menu = await ensureMenu(client);
-  await sleep(1500 + Math.random() * 1000);
 
-  // Re-fetch fresh to ensure message ID is current
-  let freshMsgs = await client.getMessages(BOT, { limit: 5 });
-  let freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
-  if (!freshMenu) freshMenu = menu; // fallback to ensureMenu result
+  // Re-fetch fresh right before clicking — avoids stale message ID = MESSAGE_ID_INVALID
+  await sleep(1000);
+  const freshMsgs = await client.getMessages(BOT, { limit: 5 });
+  const freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup) || menu;
 
   let popup = null;
-  const clickerBtn = findButton(freshMenu, "Кликер");
-  if (clickerBtn?.data) {
-    popup = await getCallbackAnswer(client, freshMenu, clickerBtn.data);
-    console.log(`[CLICKER] Popup: ${popup || "none"}`);
-  } else {
-    try { await freshMenu.click({ text: "✨ Кликер" }); } catch (_) {}
+  let captchaSolvedDuringClick = false;
+
+  await withCaptcha(client, async () => {
+    await sleep(jitter());
+    const btn = findButton(freshMenu, "Кликер");
+    if (btn?.data) {
+      popup = await getCallbackAnswer(client, freshMenu, btn.data);
+      console.log(`[CLICKER] Popup: ${popup || "none"}`);
+    } else {
+      try { await freshMenu.click({ text: "✨ Кликер" }); } catch (_) {}
+    }
+  });
+
+  // If popup was null and no captcha left in chat → captcha was shown and solved by withCaptcha
+  const afterMsgs = await client.getMessages(BOT, { limit: 3 });
+  if (popup === null && !afterMsgs.find(m => m.text?.includes("ПРОВЕРКА НА РОБОТА"))) {
+    captchaSolvedDuringClick = true;
   }
-
-  // Brief wait then check/solve captcha
-  await sleep(1500);
-  await solveCaptcha(client);
-
-  // Check whether captcha appeared instead of popup (popup null + no captcha in msgs now = captcha was shown and solved)
-  const afterMsgs  = await client.getMessages(BOT, { limit: 3 });
-  const captchaClick = popup === null && !afterMsgs.find(m => m.text?.includes("ПРОВЕРКА НА РОБОТА"));
 
   // Daily click limit
   if (popup?.includes("завтра") || popup?.includes("слишком много")) {
@@ -622,30 +614,28 @@ async function doClicker(client, userId) {
     }
     if (result !== true) { console.log("[CLICKER] Tasks failed"); return false; }
 
-    // Re-fetch fresh menu and click again after tasks
+    // Tasks done — send /start and re-fetch fresh before clicking again
     console.log("[CLICKER] Tasks done — clicking again...");
-    await client.sendMessage(BOT, { message: "/start" });
-    await sleep(4000);
-    await solveCaptcha(client);
+    await withCaptcha(client, async () => {
+      await sleep(jitter());
+      await client.sendMessage(BOT, { message: "/start" });
+      await sleep(4000);
+    });
+    const menu2 = await ensureMenu(client);
+    await sleep(1000);
+    const fresh2Msgs = await client.getMessages(BOT, { limit: 5 });
+    const fresh2Menu = fresh2Msgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup) || menu2;
 
-    freshMsgs = await client.getMessages(BOT, { limit: 5 });
-    freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup);
-    if (!freshMenu) throw new Error("MENU_NOT_FOUND");
-
-    await sleep(1500 + Math.random() * 1000);
-    // Re-fetch one more time right before clicking
-    freshMsgs = await client.getMessages(BOT, { limit: 5 });
-    freshMenu = freshMsgs.find(m => m.text?.includes("Получи свою личную ссылку") && m.replyMarkup) || freshMenu;
-
-    const btn2 = findButton(freshMenu, "Кликер");
-    if (btn2?.data) {
-      popup = await getCallbackAnswer(client, freshMenu, btn2.data);
-      console.log(`[CLICKER] Popup after tasks: ${popup || "none"}`);
-    } else {
-      try { await freshMenu.click({ text: "✨ Кликер" }); } catch (_) {}
-    }
-    await sleep(1500);
-    await solveCaptcha(client);
+    await withCaptcha(client, async () => {
+      await sleep(jitter());
+      const btn2 = findButton(fresh2Menu, "Кликер");
+      if (btn2?.data) {
+        popup = await getCallbackAnswer(client, fresh2Menu, btn2.data);
+        console.log(`[CLICKER] Popup after tasks: ${popup || "none"}`);
+      } else {
+        try { await fresh2Menu.click({ text: "✨ Кликер" }); } catch (_) {}
+      }
+    });
   }
 
   // Sponsor mid-click
@@ -653,7 +643,8 @@ async function doClicker(client, userId) {
     console.log("[CLICKER] Sponsor mid-click — resolving...");
     const sMsgs = await client.getMessages(BOT, { limit: 5 });
     const sMsg  = sMsgs.find(m =>
-      (m.text?.includes("Чтобы активировать бота:") || m.text?.includes("Для продолжения фарма звёзд")) &&
+      (m.text?.includes("Чтобы активировать бота:") ||
+       m.text?.includes("Для продолжения фарма звёзд")) &&
       m.replyMarkup
     );
     if (sMsg) {
@@ -668,11 +659,11 @@ async function doClicker(client, userId) {
     throw new Error("SPONSOR_UNRESOLVABLE");
   }
 
-  // Final captcha check (bot sometimes sends it after click with a delay)
+  // Final captcha check (bot sometimes delays it)
   await sleep(jitter());
   const captchaSolved = await solveCaptcha(client);
 
-  if (captchaSolved || captchaClick) {
+  if (captchaSolved || captchaSolvedDuringClick) {
     console.log("[CLICKER] ✅ Captcha click succeeded");
   } else {
     if (!popup?.includes("получил")) {
@@ -686,7 +677,6 @@ async function doClicker(client, userId) {
     console.log("[CLICKER] ✅ Reward confirmed");
   }
 
-  // Update stats
   const { data } = await supabase
     .from("accounts").select("total_clicks, cap").eq("user_id", userId).single();
   const totalClicks = (data?.total_clicks || 0) + 1;
@@ -714,72 +704,69 @@ async function doClicker(client, userId) {
   return true;
 }
 
-
 // ============================================
 // DAILY
 // ============================================
 async function doDaily(client, userId) {
-  console.log('[DAILY] Starting...');
+  console.log("[DAILY] Starting...");
   const menu = await ensureMenu(client);
 
-  // Step 1: Navigate to Profile using callback data (never use text-click — unreliable)
-  const profileBtn = findButton(menu, 'Профиль');
+  // Step 1: Navigate to Profile — use callback data, not text-click
+  const profileBtn = findButton(menu, "Профиль");
   if (profileBtn?.data) {
     await getCallbackAnswer(client, menu, profileBtn.data);
   } else {
-    try { await menu.click({ text: '👤 Профиль' }); } catch (_) {}
+    try { await menu.click({ text: "👤 Профиль" }); } catch (_) {}
   }
 
-  // Wait for the profile page to render, then clear any captcha before reading messages
+  // Wait for profile page to render + clear any captcha
   await sleep(3000);
   await solveCaptcha(client);
   await sleep(2000);
 
-  // Step 2: Fetch FRESH messages — critical, stale IDs cause MESSAGE_ID_INVALID
+  // Step 2: Always fetch FRESH messages — stale ID = MESSAGE_ID_INVALID
   let msgs    = await client.getMessages(BOT, { limit: 5 });
-  let profile = msgs.find(m => m.replyMarkup && m.text?.includes('Профиль'));
+  let profile = msgs.find(m => m.replyMarkup && m.text?.includes("Профиль"));
   if (!profile) {
-    // Bot can be slow — wait and retry once more
     await sleep(4000);
     msgs    = await client.getMessages(BOT, { limit: 5 });
-    profile = msgs.find(m => m.replyMarkup && m.text?.includes('Профиль'));
-    if (!profile) throw new Error('PROFILE_NOT_FOUND');
+    profile = msgs.find(m => m.replyMarkup && m.text?.includes("Профиль"));
+    if (!profile) throw new Error("PROFILE_NOT_FOUND");
   }
-  console.log('[DAILY] Profile found, clicking Ежедневка...');
+  console.log("[DAILY] Profile found, clicking Ежедневка...");
 
-  // Step 3: Click daily button on the freshly fetched profile message
-  const dailyBtn = findButton(profile, 'Ежедневка');
-  if (!dailyBtn?.data) throw new Error('DAILY_BTN_NOT_FOUND');
+  // Step 3: Click daily button on freshly fetched message
+  const dailyBtn = findButton(profile, "Ежедневка");
+  if (!dailyBtn?.data) throw new Error("DAILY_BTN_NOT_FOUND");
 
   await sleep(1500 + Math.random() * 1000);
   const popup = await getCallbackAnswer(client, profile, dailyBtn.data);
-  console.log(`[DAILY] Popup: ${popup || 'none'}`);
+  console.log(`[DAILY] Popup: ${popup || "none"}`);
 
-  // Step 4: Bot sometimes sends captcha instead of popup — handle it
+  // Step 4: Handle captcha response (bot may send it instead of inline popup)
   await sleep(2000);
   const captchaSolved = await solveCaptcha(client);
 
   if (captchaSolved) {
-    console.log('[DAILY] Captcha solved — daily registered');
+    console.log("[DAILY] Captcha solved — daily registered");
     // fall through to success
-  } else if (popup === null || popup === 'MESSAGE_EXPIRED') {
-    console.log('[DAILY] ⚠️ No response — retrying in 5min');
+  } else if (popup === null || popup === "MESSAGE_EXPIRED") {
+    console.log("[DAILY] ⚠️ No response — retrying in 5min");
     await updateAccount(userId, {
       next_daily_time: new Date(Date.now() + 5 * 60000).toISOString(),
     });
     return false;
-  } else if (popup?.includes('Сначала поставь свою личную ссылку')) {
-    console.log('[DAILY] ⚠️ Profile link required');
-    await notify(client, '⚠️ Daily: Profile Link Required',
-      `Instance: ${INSTANCE_ID}
-User: ${userId}`);
+  } else if (popup?.includes("Сначала поставь свою личную ссылку")) {
+    console.log("[DAILY] ⚠️ Profile link required");
+    await notify(client, "⚠️ Daily: Profile Link Required",
+      `Instance: ${INSTANCE_ID}\nUser: ${userId}`);
     await updateAccount(userId, {
       next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
-      last_error: 'Profile link required',
+      last_error: "Profile link required",
     });
     return false;
-  } else if (popup?.includes('уже получил') || popup?.includes('приходи завтра')) {
-    console.log('[DAILY] Already claimed — rescheduling');
+  } else if (popup?.includes("уже получил") || popup?.includes("приходи завтра")) {
+    console.log("[DAILY] Already claimed — rescheduling");
     await updateAccount(userId, {
       next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
     });
@@ -788,14 +775,14 @@ User: ${userId}`);
 
   // Success
   const { data } = await supabase
-    .from('accounts').select('total_dailies').eq('user_id', userId).single();
+    .from("accounts").select("total_dailies").eq("user_id", userId).single();
   await updateAccount(userId, {
     next_daily_time: new Date(Date.now() + DAILY_DELAY() * 60000).toISOString(),
     last_daily_at:   new Date().toISOString(),
     total_dailies:   (data?.total_dailies || 0) + 1,
     error_count: 0, last_error: null,
   });
-  console.log('[DAILY] ✅ Success');
+  console.log("[DAILY] ✅ Success");
   return true;
 }
 
@@ -815,49 +802,52 @@ async function processAccount(acc) {
 
     const now        = new Date();
     const clickerDue = new Date(acc.next_clicker_time) <= now;
-    const dailyDue   = new Date(acc.next_daily_time) <= now;
+    const dailyDue   = new Date(acc.next_daily_time)   <= now;
     const leaveDue   = acc.next_leave_time && new Date(acc.next_leave_time) <= now;
     if (!clickerDue && !dailyDue && !leaveDue) { console.log("⏭️ Nothing due"); return; }
 
-    // Each action runs independently — one failing does NOT skip the others
+    // Each action is independent — one failing does NOT skip the others
     if (clickerDue) {
-      try { await doClicker(client, acc.user_id); }
-      catch (e) {
+      try {
+        await doClicker(client, acc.user_id);
+      } catch (e) {
         console.error(`[CLICKER] ❌ ${e.message}`);
         if (e.message === "CHANNELS_TOO_MUCH") {
-          await notify(client, "🚨 Channel Limit (500)", `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}`);
+          await notify(client, "🚨 Channel Limit (500)",
+            `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}`);
           await updateAccount(acc.user_id, {
             next_clicker_time: new Date(Date.now() + (CHANNEL_LIMIT_DELAY + CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
             next_leave_time: new Date().toISOString(),
             last_error: "Channel limit (500)",
           });
         } else if (e.message === "SPONSOR_UNRESOLVABLE") {
-          await notify(client, "🚨 Sponsor Unresolvable", `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}`);
+          await notify(client, "🚨 Sponsor Unresolvable",
+            `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}`);
           await updateAccount(acc.user_id, {
             next_clicker_time: new Date(Date.now() + (SPONSOR_DELAY + CLICKER_MIN + Math.random() * CLICKER_MAX) * 60000).toISOString(),
             last_error: "Sponsor unresolvable after 3 attempts",
           });
-        } else if (["MENU_NOT_FOUND", "MESSAGE_ID_INVALID", "TIMEOUT"].some(t => e.message.includes(t))) {
-          // Transient — bot was slow or message stale, retry next cycle silently
-          console.log("[CLICKER] Transient error — rescheduling");
+        } else if (["MENU_NOT_FOUND","MESSAGE_ID_INVALID","TIMEOUT"].some(t => e.message.includes(t))) {
+          // Transient — bot was slow, retry next cycle silently
           await updateAccount(acc.user_id, {
             next_clicker_time: nextClickerTime(),
             last_error: e.message.substring(0, 100),
           });
         } else {
           await incrementError(acc.user_id, e.message);
-          await notify(client, "⚠️ Clicker Error", `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\n${e.message}`);
+          await notify(client, "⚠️ Clicker Error",
+            `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\n${e.message}`);
         }
       }
     }
 
     if (dailyDue) {
-      try { await doDaily(client, acc.user_id); }
-      catch (e) {
+      try {
+        await doDaily(client, acc.user_id);
+      } catch (e) {
         console.error(`[DAILY] ❌ ${e.message}`);
-        // Transient errors: reschedule in 15min, don't count against error limit
-        const transient = ["SPONSOR_UNRESOLVABLE", "MENU_NOT_FOUND", "PROFILE_NOT_FOUND",
-          "DAILY_BTN_NOT_FOUND", "MESSAGE_ID_INVALID", "TIMEOUT"].some(t => e.message.includes(t));
+        const transient = ["SPONSOR_UNRESOLVABLE","MENU_NOT_FOUND","PROFILE_NOT_FOUND",
+          "DAILY_BTN_NOT_FOUND","MESSAGE_ID_INVALID","TIMEOUT"].some(t => e.message.includes(t));
         if (transient) {
           console.log("[DAILY] Transient — rescheduling in 15min");
           await updateAccount(acc.user_id, {
@@ -866,7 +856,8 @@ async function processAccount(acc) {
           });
         } else {
           await incrementError(acc.user_id, e.message);
-          await notify(client, "⚠️ Daily Error", `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\n${e.message}`);
+          await notify(client, "⚠️ Daily Error",
+            `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\n${e.message}`);
         }
       }
     }
@@ -877,11 +868,11 @@ async function processAccount(acc) {
     }
 
   } catch (e) {
-    // Top-level: connection errors, session issues
+    // Top-level: connection/session failures
     console.error(`❌ ${e.message}`);
     await incrementError(acc.user_id, e.message);
-    if (client) await notify(client, "⚠️ Error", `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\n${e.message}`);
-
+    if (client) await notify(client, "⚠️ Error",
+      `Instance: ${INSTANCE_ID}\nPhone: ${acc.phone}\n${e.message}`);
   } finally {
     if (client) {
       try { await sleep(500); await client.destroy(); console.log("🔌 Disconnected"); }
